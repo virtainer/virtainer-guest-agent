@@ -502,11 +502,17 @@ mod tests {
         let agent = crate::agent::Agent::new(Default::default(), dir.path().to_path_buf());
         let mut ctx = Ctx::new(&agent);
         let fs = get_fsinfo(&mut ctx, Args::new(Default::default())).unwrap();
-        assert!(fs
+        let listed: Vec<&str> = fs
             .as_array()
             .unwrap()
             .iter()
-            .any(|f| f["mountpoint"] == "/"));
+            .map(|f| f["mountpoint"].as_str().unwrap())
+            .collect();
+        // Whatever this machine mounts, every local disk mount is listed. `/` is not
+        // always one: in a container it is an overlay, which is not a local disk.
+        for mount in local_mounts().unwrap() {
+            assert!(listed.contains(&mount.dir_lossy().as_str()), "{listed:?}");
+        }
         get_disks(&mut ctx, Args::new(Default::default())).unwrap();
     }
 }
