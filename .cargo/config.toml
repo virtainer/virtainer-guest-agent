@@ -1,0 +1,5 @@
+# The agent ships as one static musl binary that runs on every x86_64 distro.
+# Tests build for the same target, so they exercise musl's getifaddrs, getpwnam
+# and localtime rather than the dev box's glibc.
+[build]
+target = "x86_64-unknown-linux-musl"

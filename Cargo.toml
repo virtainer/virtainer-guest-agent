@@ -1,0 +1,36 @@
+[package]
+name = "virtainer-guest-agent"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.95"
+description = "QEMU Guest Agent compatible agent for Linux VMs on Cloud Hypervisor (vsock)"
+license = "Apache-2.0"
+repository = "https://github.com/virtainer/virtainer-guest-agent"
+homepage = "https://virtainer.io"
+readme = "README.md"
+keywords = ["qemu-guest-agent", "vsock", "cloud-hypervisor", "virtualization", "guest-agent"]
+categories = ["virtualization", "command-line-utilities"]
+publish = false
+
+# A standalone crate: never part of a workspace it happens to be checked out under.
+[workspace]
+
+[[bin]]
+name = "virtainer-guest-agent"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# preserve_order: replies keep QAPI member order, as qemu-ga writes them.
+serde_json = { version = "1", features = ["preserve_order"] }
+base64 = "0.22"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

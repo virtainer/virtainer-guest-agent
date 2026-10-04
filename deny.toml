@@ -1,0 +1,14 @@
+[graph]
+targets = ["x86_64-unknown-linux-musl"]
+
+[licenses]
+# Permissive licences only; anything copyleft fails the check.
+# Unicode-3.0 is unicode-ident's data licence (a build-time proc-macro dependency).
+allow = ["Apache-2.0", "MIT", "Unlicense", "Unicode-3.0"]
+confidence-threshold = 0.9
+
+[advisories]
+yanked = "deny"
+
+[bans]
+multiple-versions = "warn"

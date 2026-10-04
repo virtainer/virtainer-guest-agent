@@ -1,0 +1,8 @@
+/target
+/dist
+/e2e/work
+__pycache__/
+*.iso
+*.qcow2
+*.raw
+.env

@@ -1,0 +1,7 @@
+# MIT is listed before Apache-2.0 so that a dual-licensed crate is attributed
+# under MIT, whose licence file carries the crate's own copyright line.
+accepted = ["MIT", "Unlicense", "Apache-2.0", "Unicode-3.0"]
+targets = ["x86_64-unknown-linux-musl"]
+ignore-dev-dependencies = true
+ignore-build-dependencies = true
+private = { ignore = true }

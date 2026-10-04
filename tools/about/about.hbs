@@ -1,0 +1,25 @@
+Third-party Rust crates in virtainer-guest-agent
+================================================
+
+Generated from Cargo.lock for the x86_64-unknown-linux-musl target by
+tools/third-party-licenses.sh (cargo-about). Dev-dependencies and build
+scripts are excluded; the list includes the proc-macro crates used at build
+time, which are not linked into the binary (a superset is safe).
+
+{{#each overview}}
+* {{{name}}}: {{{count}}} crate(s)
+{{/each}}
+
+{{#each licenses}}
+--------------------------------------------------------------------------------
+{{{name}}} ({{{id}}})
+--------------------------------------------------------------------------------
+
+Used by:
+{{#each used_by}}
+  * {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}} ({{{crate.repository}}}){{/if}}{{#if crate.authors}} by{{#each crate.authors}} {{{this}}};{{/each}}{{/if}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}
