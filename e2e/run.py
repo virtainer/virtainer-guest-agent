@@ -28,6 +28,7 @@ Usage: e2e/run.py [--only name,name] [--keep] [--list]
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
@@ -41,7 +42,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from qga import Qga, QgaError, Shell  # noqa: E402
+from qga import RESTART_AGENT, Qga, QgaError, Shell  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 WORK = REPO / "e2e" / "work"
@@ -565,6 +566,302 @@ def check_shell_hangup(q, ctx):
     return "closing the connection hung up the shell and its foreground job, a nohup job lived on; an agent restart ended the session but not the user's process"
 
 
+AGENT_LOG = ("journalctl -u virtainer-guest-agent -b --no-pager -o cat 2>/dev/null"
+             " || grep virtainer-guest-agent /var/log/messages 2>/dev/null || true")
+CONF = "/etc/virtainer-guest-agent.conf"
+
+
+def agent_log(q):
+    """The agent's own log for this boot (journal, or syslog on OpenRC)."""
+    return q.sh(AGENT_LOG, check=False)
+
+
+def check_file_open_symlink(q, ctx):
+    target, link = "/tmp/vga-e2e-target", "/tmp/vga-e2e-link"
+    q.sh(f"rm -f {target} {link}; printf 'precious' > {target}; ln -s {target} {link}")
+    try:
+        for mode in ("w", "a", "w+", "a+"):
+            try:
+                h = q.call("guest-file-open", {"path": link, "mode": mode})
+                q.call("guest-file-close", {"handle": h})
+                raise AssertionError(f"mode {mode} opened a symlink")
+            except QgaError as e:
+                assert "failed to open file" in e.desc, e.desc
+        assert q.sh(f"cat {target}") == "precious", "the symlink target was modified"
+        h = q.call("guest-file-open", {"path": link, "mode": "r"})
+        data = base64.b64decode(q.call("guest-file-read", {"handle": h})["buf-b64"])
+        q.call("guest-file-close", {"handle": h})
+        assert data == b"precious", data
+    finally:
+        q.sh(f"rm -f {target} {link}", check=False)
+    return "w, a, w+ and a+ refused on a symlink, target untouched; r still reads through it"
+
+
+def expect_size_error(q, chunks):
+    """Send `chunks` on a fresh connection: the agent must answer with the size error and close."""
+    sock, stream = q.open_stream()
+    try:
+        try:
+            for chunk in chunks:
+                sock.sendall(chunk)
+        except OSError:
+            pass  # the agent already closed; its reply is still queued
+        reply = json.loads(stream.readline())
+        err = reply.get("error", {})
+        assert err.get("class") == "GenericError" and "token size limit exceeded" in err.get("desc", ""), reply
+        sock.settimeout(5)
+        assert stream.read(1) == b"", "the agent kept the connection open after the size error"
+    finally:
+        stream.close()
+        sock.close()
+
+
+def check_message_limits(q, ctx):
+    big = (b'{"execute":"guest-ping","arguments":{"pad":"' + b"A" * ((1 << 20) + 16) + b'"}}\n')
+    expect_size_error(q, [big[i:i + 65536] for i in range(0, len(big), 65536)])
+    q.call("guest-ping")
+    flood = b"[" + b"1," * 66_000 + b"]\n"
+    expect_size_error(q, [flood])
+    q.call("guest-ping")
+
+    path = "/var/tmp/vga-e2e-big"
+    data = os.urandom(2 << 20)
+    try:
+        h = q.call("guest-file-open", {"path": path, "mode": "w"})
+        written = q.call("guest-file-write", {"handle": h, "buf-b64": base64.b64encode(data).decode()}, timeout=60)
+        q.call("guest-file-close", {"handle": h})
+        assert written["count"] == len(data), written
+        digest = q.sh(f"sha256sum {path}").split()[0]
+        assert digest == hashlib.sha256(data).hexdigest(), digest
+    finally:
+        q.sh(f"rm -f {path}", check=False)
+    return "1 MiB non-write message and a token flood get the size error and a close, agent healthy after; 2 MiB guest-file-write lands intact"
+
+
+def check_connection_limit(q, ctx):
+    held = []
+    try:
+        for _ in range(16):
+            # Connections from earlier checks may still be winding down.
+            def opened():
+                try:
+                    held.append(q.open_stream(5))
+                    return True
+                except OSError:
+                    return False
+            assert wait_until(opened, 10, 0.5), f"only {len(held)} of 16 connections could be opened"
+        try:
+            sock, stream = q.open_stream(5)
+            stream.close()
+            sock.close()
+            raise AssertionError("a 17th connection was served")
+        except OSError:
+            pass
+        sock, stream = held[0]
+        sock.sendall(b'{"execute":"guest-ping"}\n')
+        assert json.loads(stream.readline()) == {"return": {}}, "an open connection stopped working"
+    finally:
+        for sock, stream in held:
+            stream.close()  # the stream holds the descriptor open past sock.close()
+            sock.close()
+
+    def back():
+        try:
+            q.call("guest-ping", timeout=5)
+            return True
+        except OSError:
+            return False
+    assert wait_until(back, 15, 0.5), "no new connection after the 16 were closed"
+    return "16 concurrent connections served, the 17th refused, a new one works after they close"
+
+
+def check_shell_limit(q, ctx):
+    opened = []
+    try:
+        for _ in range(8):
+            opened.append(Shell(q, "tester"))
+        try:
+            Shell(q, "tester").close()
+            raise AssertionError("a ninth Shell session opened")
+        except QgaError as e:
+            assert "too many Shell sessions" in e.desc, e.desc
+        q.call("guest-ping")
+    finally:
+        for s in opened:
+            s.close()
+
+    def reopened():
+        try:
+            s = Shell(q, "tester")
+            s.send(b"echo limit-$((20+2)); exit\n")
+            ok = s.read_until(lambda s: "limit-22" in s.text())
+            s.close()
+            return ok
+        except QgaError:
+            return False
+    assert wait_until(reopened, 15, 0.5), "slots did not come back after the sessions closed"
+    return "8 tester sessions open, the 9th gets a QGA error, a new one works after they close"
+
+
+def check_exec_lingering_pipe(q, ctx):
+    try:
+        pid = q.call("guest-exec", {"path": "/bin/sh", "arg": ["-c", "sleep 300 & echo hi"],
+                                    "capture-output": True})["pid"]
+        status = None
+        for _ in range(40):
+            status = q.call("guest-exec-status", {"pid": pid})
+            if status["exited"]:
+                break
+            time.sleep(0.25)
+        assert status["exited"], f"guest-exec still running 10s after the shell exited: {status}"
+        assert status.get("exitcode") == 0, status
+        assert base64.b64decode(status.get("out-data", "")) == b"hi\n", status
+        assert processes(q, "sleep 300") == 1, "the background sleeper is gone"
+    finally:
+        kill_processes(q, "sleep 300")
+    return "exited reported while a background child still held the pipe; out-data 'hi'"
+
+
+def check_exec_args_not_logged(q, ctx):
+    secret = f"s3cret-{os.urandom(6).hex()}"
+    code, out, _ = q.exec(["/bin/echo", secret])
+    assert code == 0 and out.strip() == secret.encode(), (code, out)
+    pattern = re.compile(r'guest-exec called: "/bin/echo" \(pid \d+, \d+ arguments?\)')
+    log_text = wait_until(lambda: (t := agent_log(q)) and pattern.search(t) and t, 10, 0.5)
+    assert log_text, f"no exec line in the agent log:\n{agent_log(q)[-600:]}"
+    assert secret not in log_text, "a guest-exec argument reached the agent log"
+    return "the log has the exec line (path, argument count) but not the argument"
+
+
+def check_log_forging(q, ctx):
+    path = "/tmp/vga-e2e-nope\nFORGED-LINE injected"
+    try:
+        q.call("guest-file-open", {"path": path})
+        raise AssertionError("opened a path that does not exist")
+    except QgaError as e:
+        assert "failed to open file" in e.desc, e.desc
+    pattern = re.compile(r"guest-file-open called, filepath: /tmp/vga-e2e-nope.*FORGED-LINE")
+    log_text = wait_until(lambda: (t := agent_log(q)) and pattern.search(t) and t, 10, 0.5)
+    assert log_text, f"the request was not logged:\n{agent_log(q)[-600:]}"
+    forged = [l for l in log_text.splitlines() if l.lstrip().startswith("FORGED-LINE")]
+    assert not forged, f"a forged log line exists: {forged}"
+    return "newline in a path is escaped inside one log line; no line starts with the forged text"
+
+
+def check_freeze_timeout(q, ctx):
+    q.sh(f"printf 'freeze-timeout = 5\\n' > {CONF} && chown root:root {CONF} && chmod 644 {CONF}")
+    frozen = False
+    try:
+        q.restart_agent()
+        assert q.call("guest-fsfreeze-freeze", timeout=60) > 0
+        frozen = True
+        start = time.monotonic()
+        thawed = wait_until(lambda: q.call("guest-fsfreeze-status") == "thawed", 20, 0.5)
+        took = time.monotonic() - start
+        frozen = not thawed
+        assert thawed, "the watchdog did not thaw within 20s of a 5s freeze-timeout"
+        assert 3 <= took <= 12, f"auto-thaw after {took:.1f}s"
+        assert q.call("guest-fsfreeze-thaw") == 0
+        q.sh("echo after-auto-thaw > /var/tmp/vga-after-thaw && sync")
+        log_text = wait_until(lambda: (t := agent_log(q)) and "auto-thawed" in t and t, 10, 0.5)
+        assert log_text, "no 'auto-thawed' line in the agent log"
+    finally:
+        if frozen:
+            q.call("guest-fsfreeze-thaw", timeout=60)
+        q.sh(f"rm -f {CONF}", check=False)
+        q.restart_agent()
+    return f"filesystems auto-thawed after {took:.1f}s with freeze-timeout = 5; later thaw returned 0; config removed, agent restarted"
+
+
+def check_untrusted_config_refused(q, ctx):
+    status = "/tmp/vga-e2e-cfg.status"
+    script = "/tmp/vga-e2e-cfg.sh"
+    q.sh(
+        f"cat > {script} <<'EOF'\n"
+        f"rm -f {status}\n"
+        f": > {CONF}; chown root:root {CONF}; chmod 664 {CONF}\n"
+        f"{RESTART_AGENT}\n"
+        "sleep 9\n"
+        "if [ -d /run/systemd/system ]; then systemctl is-active virtainer-guest-agent > "
+        f"{status}.tmp 2>&1; else echo no-systemd > {status}.tmp; fi\n"
+        f"chmod 644 {CONF}\n"
+        f"{RESTART_AGENT}\n"
+        f"mv {status}.tmp {status}\n"
+        "EOF"
+    )
+    try:
+        q.call("guest-exec", {"path": "/bin/sh", "arg": ["-c", f"setsid sh {script} >/dev/null 2>&1 </dev/null &"]})
+
+        def down():
+            try:
+                q.call("guest-ping", timeout=3)
+                return False
+            except Exception:  # noqa: BLE001
+                return True
+        assert wait_until(down, 15, 0.3), "the agent kept answering with a group-writable config"
+        answered = 0
+        end = time.monotonic() + 4
+        while time.monotonic() < end:
+            try:
+                q.call("guest-ping", timeout=2)
+                answered += 1
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(0.4)
+        assert answered == 0, f"the agent answered {answered} times with a group-writable config"
+    finally:
+        # The script restores a trusted config and restarts on its own.
+        q.wait_ready(90, 1)
+    state = wait_until(lambda: q.sh(f"cat {status} 2>/dev/null || true", check=False).strip(), 15, 0.5)
+    log_text = agent_log(q)
+    q.sh(f"rm -f {CONF} {script} {status} {status}.tmp", check=False)
+    assert state, "the recorded status never appeared"
+    assert state != "active", f"service manager said '{state}' while the config was group-writable"
+    assert "refusing to start" in log_text and "must not be writable by group or others" in log_text, log_text[-800:]
+    return f"mode 0664 config: agent silent, service '{state}', log says why; after chmod 644 it answers again"
+
+
+def check_block_rpcs(q, ctx):
+    boot_id = lambda: q.sh("cat /proc/sys/kernel/random/boot_id").strip()  # noqa: E731
+    before = boot_id()
+    q.sh(f"printf 'block-rpcs = guest-exec\\n' > {CONF} && chown root:root {CONF} && chmod 644 {CONF}")
+    try:
+        q.restart_agent()
+        enabled = {c["name"]: c["enabled"] for c in q.call("guest-info")["supported_commands"]}
+        assert enabled["guest-exec"] is False and enabled["__io.virtainer_shell"] is False, enabled
+        assert enabled["guest-ping"] and enabled["guest-exec-status"] and enabled["guest-file-open"], enabled
+        try:
+            q.call("guest-exec", {"path": "/bin/true"})
+            raise AssertionError("guest-exec ran although it is blocked")
+        except QgaError as e:
+            assert e.error_class == "CommandNotFound" and "disabled" in e.desc, e
+        try:
+            Shell(q, "root").close()
+            raise AssertionError("a Shell opened although guest-exec is blocked")
+        except QgaError as e:
+            assert e.error_class == "CommandNotFound" and "disabled" in e.desc, e
+    finally:
+        # Without exec nothing else can undo this: empty the file (empty means
+        # defaults) and reboot so the agent re-reads it.
+        try:
+            h = q.call("guest-file-open", {"path": CONF, "mode": "w"})
+            q.call("guest-file-close", {"handle": h})
+        except Exception:  # noqa: BLE001 - the agent may be down; the reboot below still helps
+            pass
+        q.raw({"execute": "guest-shutdown", "arguments": {"mode": "reboot"}}, expect_reply=False, timeout=5)
+
+        def rebooted():
+            try:
+                return boot_id() != before
+            except Exception:  # noqa: BLE001 - down while rebooting
+                return False
+        assert wait_until(rebooted, 300, 2), "guest did not come back after the reboot"
+    code, out, _ = q.exec(["/bin/echo", "exec-works"])
+    assert code == 0 and out == b"exec-works\n", (code, out)
+    q.sh(f"rm -f {CONF}")
+    return "guest-exec and the Shell disabled in guest-info and refused; after emptying the config and a reboot, guest-exec works"
+
+
 def check_against_qemu_ga(q, ctx):
     path = q.sh("command -v qemu-ga || ls /usr/bin/qemu-ga /usr/sbin/qemu-ga 2>/dev/null | head -1 || true").strip()
     if not path:
@@ -634,8 +931,11 @@ CHECKS = [
     check_fsfreeze, check_exec, check_files, check_ssh_keys, check_password, check_time,
     check_vcpu_hotplug, check_memory_hotplug, check_fstrim, check_misc,
     check_loopback_rejected, check_selinux, check_install_idempotent, check_legacy_qga_migration,
-    check_shell, check_shell_hangup, check_against_qemu_ga,
-    check_reboot,
+    check_shell, check_shell_hangup, check_file_open_symlink, check_message_limits,
+    check_connection_limit, check_shell_limit, check_exec_lingering_pipe,
+    check_exec_args_not_logged, check_log_forging, check_freeze_timeout,
+    check_untrusted_config_refused, check_against_qemu_ga,
+    check_block_rpcs, check_reboot,
 ]
 
 

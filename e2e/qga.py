@@ -13,6 +13,13 @@ import socket
 import time
 
 
+# `reset-failed` clears a start-limit trip left by a crash loop.
+RESTART_AGENT = (
+    "if [ -d /run/systemd/system ]; then systemctl reset-failed virtainer-guest-agent 2>/dev/null;"
+    " systemctl restart virtainer-guest-agent; else rc-service virtainer-guest-agent restart; fi"
+)
+
+
 class QgaError(Exception):
     def __init__(self, error):
         super().__init__(f"{error.get('class')}: {error.get('desc')}")
@@ -53,6 +60,10 @@ class Qga:
             raise RuntimeError(f"sync id mismatch: {reply}")
         return sock, stream
 
+    def open_stream(self, timeout=None):
+        """A synced connection for tests that speak the wire protocol themselves."""
+        return self._connect(timeout or self.timeout)
+
     def raw(self, request, timeout=None, expect_reply=True):
         """Send one request object; return the decoded reply dict (or None)."""
         sock, stream = self._connect(timeout or self.timeout)
@@ -78,6 +89,28 @@ class Qga:
         if "error" in reply:
             raise QgaError(reply["error"])
         return reply["return"]
+
+    def restart_agent(self, ready_s=60):
+        """Restart the agent through the guest's service manager, then wait for it.
+
+        The restart runs as a guest-exec child that outlives the agent (the
+        service does not kill its children). An open connection tells when
+        the old agent is gone, so the wait cannot be satisfied by it.
+        """
+        sock, _ = self._connect(self.timeout)
+        try:
+            self.call("guest-exec", {"path": "/bin/sh", "arg": ["-c", RESTART_AGENT]})
+            sock.settimeout(30)
+            try:
+                while sock.recv(4096):
+                    pass
+            except socket.timeout:
+                raise TimeoutError("the agent did not go down after the restart command") from None
+            except OSError:
+                pass
+        finally:
+            sock.close()
+        return self.wait_ready(ready_s, 1)
 
     def wait_ready(self, deadline_s, poll_s=2.0):
         start = time.monotonic()

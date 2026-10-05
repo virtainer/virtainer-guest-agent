@@ -291,7 +291,17 @@ talks to it over hybrid vsock. The suite checks:
 - authorized-keys changes (including a symlink to `/etc/shadow`),
   `guest-set-user-password` and `guest-set-time`;
 - live vCPU and memory hot-add;
-- the Shell, including hang-up on disconnect;
+- the Shell, including hang-up on disconnect and the limit of 8 sessions;
+- `guest-file-open` refusing to follow a symlink in the write modes (reads
+  still follow it);
+- the message limits (a 1 MiB non-write message and a token flood get the
+  size error and a close, a 2 MiB `guest-file-write` lands intact) and the
+  limit of 16 connections;
+- `guest-exec` returning while a background child still holds its pipe,
+  keeping arguments out of the log, and log lines that cannot be forged with a
+  newline in a path;
+- the configuration file: `freeze-timeout` auto-thaw, `block-rpcs` (including
+  the Shell), and refusal to start on a group-writable file;
 - rejection of a connection from a local (loopback) vsock client;
 - the SELinux context, where SELinux is enabled;
 - `install` idempotence and the legacy qemu-ga unit cleanup;
