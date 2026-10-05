@@ -330,6 +330,10 @@ mod tests {
         logger.write(Level::Info, "one");
         assert_eq!(recv_all(&first).len(), 1);
 
+        // Shut the receiver down rather than only dropping it: a test running in parallel
+        // may fork while `first` is open, and until that child execs (CLOEXEC) it keeps
+        // the socket alive, so sends to a merely dropped peer can still succeed.
+        first.shutdown(std::net::Shutdown::Read).unwrap();
         drop(first);
         std::fs::remove_file(&path).unwrap();
         logger.write(Level::Info, "lost 1");
