@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.1
+
+No change in what the agent does on a guest. This release carries the test
+fixes made since 0.2.0, so that a host shipping it can be told apart from one
+shipping 0.2.0.
+
+- The file-system info test no longer assumes `/` is a local disk.
+- The syslog reconnect test no longer depends on forks made by other tests
+  running in parallel.
+- The end-to-end suite covers more of the agent (file-open symlinks, limits,
+  `guest-exec` supervision, logging and the configuration file), waits for
+  cloud-init before it starts, and tells failures of the image or of the
+  reference qemu-ga apart from failures of the agent.
+
 ## 0.2.0
 
 First public release.
