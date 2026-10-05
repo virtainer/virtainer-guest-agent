@@ -255,7 +255,11 @@ def check_network(q, ctx):
     found = wait_until(find, 60, 2)
     if not found:
         seen = q.sh("ip -br addr 2>&1; grep -rhs -A2 '^network' /etc/cloud/cloud.cfg /etc/cloud/cloud.cfg.d/ | head -20", check=False)
-        raise AssertionError(f"static address never showed up on the NIC; the guest has:\n{seen}")
+        # The agent reports what the guest has. If the guest itself never got the
+        # address, that is the image's network setup, not an agent result.
+        if f"{GUEST_IP}/24" not in q.sh("ip -br addr 2>&1", check=False):
+            return f"SKIP: the guest never configured {GUEST_IP} (ip addr agrees with the agent):\n{seen}"
+        raise AssertionError(f"the guest has {GUEST_IP} but the agent does not report it:\n{seen}")
     return f"{found[0]} {found[1]} rx-packets={found[2]}"
 
 
@@ -870,6 +874,7 @@ def check_against_qemu_ga(q, ctx):
     ref = Qga(str(ctx["vm"].vsock), port=101)
     ref.wait_ready(20, 0.5)
     compared = []
+    reference_failed = None
     for cmd in ("guest-get-osinfo", "guest-get-host-name", "guest-get-timezone",
                 "guest-network-get-interfaces", "guest-get-fsinfo", "guest-get-disks",
                 "guest-get-vcpus", "guest-get-memory-block-info", "guest-fsfreeze-status",
@@ -877,10 +882,11 @@ def check_against_qemu_ga(q, ctx):
         mine = q.call(cmd)
         try:
             theirs = ref.call(cmd)
-        except Exception as e:  # noqa: BLE001 - say which side failed
-            raise AssertionError(
-                f"the reference qemu-ga failed on {cmd} ({type(e).__name__}: {e}); "
-                f"the {len(compared)} commands before it were identical") from e
+        except Exception as e:  # noqa: BLE001 - the reference, not the agent, failed
+            # Some images ship a qemu-ga that crashes on a command (RHEL 9.7's on
+            # guest-network-get-route). Nothing after that can be compared.
+            reference_failed = f"{cmd} ({type(e).__name__}: {e})"
+            break
         if cmd in ("guest-network-get-interfaces",):
             strip = lambda l: sorted((i["name"], i.get("hardware-address"), sorted((a["ip-address"], a["prefix"]) for a in i.get("ip-addresses", []))) for i in l)  # noqa: E731
             mine, theirs = strip(mine), strip(theirs)
@@ -908,6 +914,10 @@ def check_against_qemu_ga(q, ctx):
             raise AssertionError(f"{cmd} differs:\n  ours:    {mine}\n  qemu-ga: {theirs}")
         compared.append(cmd)
     q.sh("kill $(cat /run/qga-compare.pid) 2>/dev/null || true", check=False)
+    if reference_failed:
+        if len(compared) < 5:
+            raise AssertionError(f"the reference qemu-ga failed on {reference_failed} after only {len(compared)} commands")
+        return f"identical to {path} for {len(compared)} commands; the reference failed on {reference_failed}"
     return f"identical to {path} for {len(compared)} commands"
 
 
@@ -957,6 +967,10 @@ def test_distro(name, agent_iso, keep):
             results.append(("boot", False, str(e)))
             return results, None
         log(f"{name}: agent ready after {took:.0f}s")
+        # The agent starts before cloud-init has created the test user; checks that
+        # touch that user must not race it.
+        q.sh("command -v cloud-init >/dev/null 2>&1 && cloud-init status --wait >/dev/null 2>&1; true",
+             timeout=600, check=False)
         ctx = {"os_id": os_id, "hostname": vm.hostname, "vm": vm}
         for check in CHECKS:
             label = check.__name__.removeprefix("check_")
