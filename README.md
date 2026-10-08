@@ -1,10 +1,10 @@
-# Virtainer guest agent
+# Virtainer Guest Agent — a QEMU Guest Agent (qemu-ga) for Cloud Hypervisor
 
-[Virtainer](https://virtainer.io) is a virtualization platform; this is its guest
-component for classic VMs. It is a QEMU Guest Agent (QGA) compatible agent for
-x86_64 Linux VMs on Cloud Hypervisor: one static binary (about 1 MB, no
-runtime dependencies), reached by the host over vsock, that installs itself in
-systemd and OpenRC guests.
+The Virtainer Guest Agent is a QEMU Guest Agent (QGA, qemu-ga) compatible agent
+for x86_64 Linux VMs on Cloud Hypervisor, from [Virtainer](https://virtainer.io):
+one static binary (about 1 MB, no runtime dependencies), reached by the host
+over vsock, that installs itself in systemd and OpenRC guests. It is the guest
+component of the Virtainer virtualization platform for classic VMs.
 
 It replaces installing `qemu-guest-agent` in every guest, which needs internet
 access at first boot, per-distro package names, unit overrides and SELinux
@@ -320,3 +320,11 @@ Copyright 2026 The Virtainer authors. Licensed under the
 `src/autoonline.rs` is adapted from Kata Containers (also Apache-2.0); see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the notices that ship
 with the binary. No QEMU (GPL) code is included, and none may be added.
+
+## About Virtainer
+
+[Virtainer](https://virtainer.io) is a self-hosted virtualization platform for
+hardware you own: it runs full Linux VMs and Docker images as hardware-isolated
+machines. Virtainer Free runs on a single host; [Virtainer Pro](https://virtainer.io/pro),
+the multi-host edition for clusters, is in development. The Virtainer Guest Agent
+is one of [Virtainer's open-source components](https://virtainer.io/open-source).
