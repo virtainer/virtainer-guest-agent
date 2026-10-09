@@ -19,6 +19,8 @@ mod session;
 mod shell;
 mod sys;
 mod vsock;
+#[cfg(any(target_os = "windows", test))]
+mod windows_support;
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
