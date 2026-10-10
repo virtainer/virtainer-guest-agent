@@ -1,4 +1,4 @@
-# Virtainer Guest Agent — a QEMU Guest Agent (qemu-ga) for Cloud Hypervisor
+# Virtainer Guest Agent — a modern, vsock-native guest agent that speaks the QEMU Guest Agent protocol
 
 The Virtainer Guest Agent is a QEMU Guest Agent (QGA, qemu-ga) compatible agent
 for x86_64 Linux VMs on Cloud Hypervisor, from [Virtainer](https://virtainer.io):
