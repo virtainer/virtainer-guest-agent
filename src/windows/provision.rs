@@ -5,6 +5,7 @@
 
 use super::{api, data_dir};
 use crate::windows_support::{
+    accounts,
     fat12::Fat12,
     provision::{uuid, Phase, Provision, Record, State},
 };
@@ -187,6 +188,18 @@ fn service_phase(p: &crate::windows_support::provision::Provision) -> Result<(),
     )?;
     Ok(())
 }
+fn disable_builtin_admin(seed: &Seed) -> Result<(), String> {
+    seed.stable()?;
+    let action = "disable built-in Administrator";
+    let admin = seed
+        .config
+        .admin
+        .as_ref()
+        .ok_or_else(|| format!("{action}: no administrator account requested"))?;
+    let input = accounts::disable_builtin(admin);
+    sys::ps(include_str!("builtin.ps1"), &input, action, &[])?;
+    Ok(())
+}
 fn user_script(seed: &Seed) -> Result<(), String> {
     seed.stable()?;
     let bytes = seed
@@ -278,6 +291,7 @@ fn apply(seed: &Seed, phase: Phase, agent: Option<&Agent>) -> Result<Record, Str
             Ok(())
         },
         |phase| apply_system(seed, phase),
+        || disable_builtin_admin(seed),
         || user_script(seed),
     );
     // A failed final checkpoint can leave `record` marked done in memory; publish only on success.

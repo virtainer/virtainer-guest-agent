@@ -32,6 +32,10 @@ pub struct Provision {
 pub struct Admin {
     pub username: String,
     pub password: String,
+    /// Disable the built-in Administrator account (RID 500) once this
+    /// account is an administrator.
+    #[serde(default)]
+    pub disable_builtin: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -173,6 +177,9 @@ impl Provision {
         }
         Ok(())
     }
+    pub fn disables_builtin_admin(&self) -> bool {
+        self.admin.as_ref().is_some_and(|a| a.disable_builtin)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -185,7 +192,7 @@ pub enum State {
 }
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum Script {
+pub enum Step {
     #[default]
     Pending,
     Started,
@@ -200,8 +207,12 @@ pub struct Record {
     pub errors: Vec<String>,
     pub specialized: bool,
     pub configured: bool,
-    pub script: Script,
+    pub script: Step,
     pub script_requested: bool,
+    #[serde(default)]
+    pub builtin_admin: Step,
+    #[serde(default)]
+    pub builtin_admin_requested: bool,
 }
 #[derive(Clone, Copy)]
 pub enum Phase {
@@ -218,8 +229,10 @@ impl Record {
             errors: Vec::new(),
             specialized: false,
             configured: false,
-            script: Script::Pending,
+            script: Step::Pending,
             script_requested: p.user_script.is_some(),
+            builtin_admin: Step::Pending,
+            builtin_admin_requested: p.disables_builtin_admin(),
         }
     }
     pub fn report(&self) -> serde_json::Value {
@@ -230,9 +243,35 @@ impl Record {
         self.state = State::Failed;
         self.errors.push(error);
     }
+    /// Run a non-blocking step at most once. Its failure is reported; an
+    /// interrupted run has an unknown outcome and is reported, not replayed.
+    fn once(
+        &mut self,
+        step: fn(&mut Self) -> &mut Step,
+        interrupted: &str,
+        save: &mut impl FnMut(&Self) -> Result<(), String>,
+        run: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        match *step(self) {
+            Step::Pending => {
+                *step(self) = Step::Started;
+                save(self)?;
+                if let Err(e) = run() {
+                    self.errors.push(e);
+                }
+            }
+            Step::Started => self.errors.push(interrupted.into()),
+            Step::Finished => return Ok(()),
+        }
+        *step(self) = Step::Finished;
+        save(self)
+    }
 
     /// Every action is preceded by a durable checkpoint. Uncertain system
-    /// changes fail closed. Script uncertainty is non-blocking per the contract.
+    /// changes fail closed. Disabling the built-in Administrator and the user
+    /// script are non-blocking per the contract.
+    // Each side effect is a separate argument so tests can observe its order.
+    #[allow(clippy::too_many_arguments)]
     pub fn apply(
         &mut self,
         p: &Provision,
@@ -240,7 +279,8 @@ impl Record {
         effective_hostname: Option<&str>,
         mut save: impl FnMut(&Self) -> Result<(), String>,
         mut system: impl FnMut(Phase) -> Result<(), String>,
-        mut script: impl FnMut() -> Result<(), String>,
+        builtin_admin: impl FnOnce() -> Result<(), String>,
+        script: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
         if self.instance_id != p.instance_id {
             return Err("provision instance mismatch".into());
@@ -293,24 +333,21 @@ impl Record {
                     self.configured = true;
                     save(self)?;
                 }
+                if p.disables_builtin_admin() {
+                    self.once(
+                        |r| &mut r.builtin_admin,
+                        "disabling the built-in Administrator interrupted; outcome unknown; not replayed",
+                        &mut save,
+                        builtin_admin,
+                    )?;
+                }
                 if p.user_script.is_some() {
-                    match self.script {
-                        Script::Pending => {
-                            self.script = Script::Started;
-                            save(self)?;
-                            if let Err(e) = script() {
-                                self.errors.push(e);
-                            }
-                            self.script = Script::Finished;
-                        }
-                        Script::Started => {
-                            self.errors.push(
-                                "user script interrupted; outcome unknown; not replayed".into(),
-                            );
-                            self.script = Script::Finished;
-                        }
-                        Script::Finished => {}
-                    }
+                    self.once(
+                        |r| &mut r.script,
+                        "user script interrupted; outcome unknown; not replayed",
+                        &mut save,
+                        script,
+                    )?;
                 }
                 self.state = State::Done;
                 save(self)
@@ -371,6 +408,153 @@ mod tests {
             .is_empty());
     }
     #[test]
+    fn disable_builtin_is_an_optional_admin_boolean() {
+        let parse = |admin| {
+            let mut d = document();
+            d["admin"] = admin;
+            Provision::parse(&serde_json::to_vec(&d).unwrap())
+        };
+        let omitted = parse(json!({"username":"ops","password":"private-test-value"})).unwrap();
+        assert!(!omitted.disables_builtin_admin());
+        assert!(!Record::new(&omitted).builtin_admin_requested);
+        for (value, requested) in [(false, false), (true, true)] {
+            let p = parse(
+                json!({"username":"ops","password":"private-test-value","disable_builtin":value}),
+            )
+            .unwrap();
+            assert_eq!(p.disables_builtin_admin(), requested);
+            assert_eq!(Record::new(&p).builtin_admin_requested, requested);
+        }
+        for value in [json!("true"), json!(1), json!(null)] {
+            let err = parse(
+                json!({"username":"ops","password":"private-test-value","disable_builtin":value}),
+            )
+            .err()
+            .unwrap();
+            assert!(!err.contains("private-test-value"));
+        }
+        // The conflicting combination is accepted; the helper's SID check refuses
+        // it, the step reports that, and the rest of provisioning still applies.
+        const CONFLICT: &str =
+            "admin.username is the built-in Administrator account; it was not disabled";
+        let conflict = parse(json!({"username":"Administrator",
+            "password":"private-test-value","disable_builtin":true}))
+        .unwrap();
+        assert!(conflict.disables_builtin_admin());
+        let mut r = Record::new(&conflict);
+        r.specialized = true;
+        r.apply(
+            &conflict,
+            Phase::Service,
+            Some("web-01"),
+            |_| Ok(()),
+            |_| Ok(()),
+            || Err(CONFLICT.to_string()),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(r.state, State::Done);
+        assert_eq!(r.errors, vec![CONFLICT.to_string()]);
+    }
+    #[test]
+    fn builtin_admin_runs_once_after_accounts_and_failure_is_not_blocking() {
+        let mut p = config();
+        p.admin.as_mut().unwrap().username = "ops".into();
+        p.admin.as_mut().unwrap().disable_builtin = true;
+        let mut r = Record::new(&p);
+        r.specialized = true;
+        let order = std::cell::RefCell::new(Vec::new());
+        let mut saved = Vec::new();
+        r.apply(
+            &p,
+            Phase::Service,
+            Some("web-01"),
+            |r| {
+                saved.push((r.configured, r.builtin_admin, r.script));
+                Ok(())
+            },
+            |_| {
+                order.borrow_mut().push("accounts");
+                Ok(())
+            },
+            || {
+                order.borrow_mut().push("builtin");
+                Err("disable built-in Administrator: exit status 1".into())
+            },
+            || {
+                order.borrow_mut().push("script");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(*order.borrow(), ["accounts", "builtin", "script"]);
+        assert!(saved.contains(&(true, Step::Started, Step::Pending)));
+        assert_eq!(r.state, State::Done);
+        assert_eq!(r.builtin_admin, Step::Finished);
+        assert_eq!(r.errors.len(), 1);
+        r.apply(
+            &p,
+            Phase::Service,
+            Some("web-01"),
+            |_| panic!(),
+            |_| panic!(),
+            || panic!(),
+            || panic!(),
+        )
+        .unwrap();
+
+        let mut r = Record::new(&p);
+        r.specialized = true;
+        r.configured = true;
+        r.state = State::Applying;
+        r.builtin_admin = Step::Started;
+        r.apply(
+            &p,
+            Phase::Service,
+            Some("web-01"),
+            |_| Ok(()),
+            |_| panic!(),
+            || panic!("must not replay"),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(r.state, State::Done);
+        assert_eq!(r.errors.len(), 1);
+        assert!(r.errors[0].contains("not replayed"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut unfinished = r.clone();
+        unfinished.builtin_admin = Step::Started;
+        std::fs::write(&path, serde_json::to_vec(&unfinished).unwrap()).unwrap();
+        assert!(load_record(&path, &p).is_err());
+        let mut early = Record::new(&p);
+        early.builtin_admin = Step::Started;
+        std::fs::write(&path, serde_json::to_vec(&early).unwrap()).unwrap();
+        assert!(load_record(&path, &p).is_err());
+        std::fs::write(&path, serde_json::to_vec(&r).unwrap()).unwrap();
+        assert_eq!(load_record(&path, &p).unwrap().state, State::Done);
+    }
+    #[test]
+    fn records_without_the_builtin_checkpoint_still_load() {
+        let p = Provision::parse(
+            &serde_json::to_vec(&json!({"schema":1,
+                "instance_id":"00000000-0000-4000-8000-000000000001","seed_version":"a".repeat(64)}))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut record = serde_json::to_value(Record::new(&p)).unwrap();
+        let fields = record.as_object_mut().unwrap();
+        fields.remove("builtin_admin");
+        fields.remove("builtin_admin_requested");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let r = load_record(&path, &p).unwrap();
+        assert_eq!(r.builtin_admin, Step::Pending);
+        assert!(!r.builtin_admin_requested);
+    }
+    #[test]
     fn active_hostname_gates_accounts_and_script_across_service_restarts() {
         let p = config();
         let dir = tempfile::tempdir().unwrap();
@@ -379,8 +563,16 @@ mod tests {
             std::fs::write(&path, serde_json::to_vec(r).unwrap()).map_err(|e| e.to_string())
         };
         let mut r = Record::new(&p);
-        r.apply(&p, Phase::Specialize, None, save, |_| Ok(()), || panic!())
-            .unwrap();
+        r.apply(
+            &p,
+            Phase::Specialize,
+            None,
+            save,
+            |_| Ok(()),
+            || panic!(),
+            || panic!(),
+        )
+        .unwrap();
         for active in [Some("OLD-NAME"), None, Some("OLD-NAME")] {
             let mut r = load_record(&path, &p).unwrap();
             assert!(r.specialized);
@@ -391,11 +583,12 @@ mod tests {
                 |_| panic!(),
                 |_| panic!(),
                 || panic!(),
+                || panic!(),
             )
             .unwrap();
             assert_eq!(r.report()["state"], "pending");
             assert!(!r.configured);
-            assert_eq!(r.script, Script::Pending);
+            assert_eq!(r.script, Step::Pending);
         }
         let mut r = load_record(&path, &p).unwrap();
         r.apply(
@@ -404,6 +597,7 @@ mod tests {
             Some("web-01"),
             save,
             |_| Ok(()),
+            || panic!(),
             || Ok(()),
         )
         .unwrap();
@@ -416,6 +610,7 @@ mod tests {
             |_| panic!(),
             |_| panic!(),
             || panic!(),
+            || panic!(),
         )
         .unwrap();
     }
@@ -425,8 +620,16 @@ mod tests {
         p.hostname = None;
         let mut r = Record::new(&p);
         r.specialized = true;
-        r.apply(&p, Phase::Service, None, |_| Ok(()), |_| Ok(()), || Ok(()))
-            .unwrap();
+        r.apply(
+            &p,
+            Phase::Service,
+            None,
+            |_| Ok(()),
+            |_| Ok(()),
+            || panic!(),
+            || Ok(()),
+        )
+        .unwrap();
         assert_eq!(r.state, State::Done);
     }
     #[test]
@@ -441,6 +644,7 @@ mod tests {
             |_| Ok(()),
             |_| panic!("before specialize"),
             || panic!(),
+            || panic!(),
         )
         .unwrap();
         assert_eq!(r.state, State::Pending);
@@ -454,6 +658,7 @@ mod tests {
                 Ok(())
             },
             || panic!(),
+            || panic!(),
         )
         .unwrap();
         r.apply(
@@ -465,6 +670,7 @@ mod tests {
                 calls += 1;
                 Ok(())
             },
+            || panic!(),
             || Err("user script failed (exit status 1)".into()),
         )
         .unwrap();
@@ -479,6 +685,7 @@ mod tests {
                 |_| panic!(),
                 |_| panic!(),
                 || panic!(),
+                || panic!(),
             )
             .unwrap();
         }
@@ -490,6 +697,7 @@ mod tests {
             Some("web-01"),
             |_| panic!(),
             |_| panic!(),
+            || panic!(),
             || panic!(),
         )
         .unwrap();
@@ -513,6 +721,7 @@ mod tests {
                 Some("web-01"),
                 |_| Err("disk full".into()),
                 |_| panic!(),
+                || panic!(),
                 || panic!()
             )
             .is_err());
@@ -526,6 +735,7 @@ mod tests {
                 |_| Ok(()),
                 |_| panic!(),
                 || panic!(),
+                || panic!(),
             )
             .unwrap();
         assert_eq!(recovered.state, State::Failed);
@@ -533,13 +743,14 @@ mod tests {
         r.specialized = true;
         r.configured = true;
         r.state = State::Applying;
-        r.script = Script::Started;
+        r.script = Step::Started;
         r.apply(
             &p,
             Phase::Service,
             Some("web-01"),
             |_| Ok(()),
             |_| panic!(),
+            || panic!(),
             || panic!("must not replay"),
         )
         .unwrap();
@@ -557,6 +768,7 @@ mod tests {
             |_| Ok(()),
             |_| Err("network failed".into()),
             || panic!(),
+            || panic!(),
         )
         .unwrap();
         assert_eq!(r.state, State::Failed);
@@ -566,6 +778,7 @@ mod tests {
             Some("web-01"),
             |_| panic!(),
             |_| panic!(),
+            || panic!(),
             || panic!(),
         )
         .unwrap();
@@ -577,6 +790,7 @@ mod tests {
             Some("web-01"),
             |_| Ok(()),
             |_| panic!(),
+            || panic!(),
             || panic!(),
         )
         .unwrap();
@@ -612,10 +826,12 @@ pub fn read_record(file: std::fs::File, instance_id: &str) -> Result<Record, Str
         || r.seed_version.len() != 64
         || !r.seed_version.bytes().all(|b| b.is_ascii_hexdigit())
         || (r.configured && !r.specialized)
+        || (!r.configured && (r.script != Step::Pending || r.builtin_admin != Step::Pending))
         || (r.state == State::Done
             && (!r.specialized
                 || !r.configured
-                || (r.script_requested && r.script != Script::Finished)))
+                || (r.script_requested && r.script != Step::Finished)
+                || (r.builtin_admin_requested && r.builtin_admin != Step::Finished)))
     {
         return Err("persisted provisioning record is inconsistent".into());
     }
@@ -644,6 +860,7 @@ mod persistence_tests {
             save,
             |_| Ok(()),
             || panic!(),
+            || panic!(),
         )
         .unwrap();
         let mut r = load_record(&path, &p).unwrap();
@@ -654,6 +871,7 @@ mod persistence_tests {
             save,
             |_| Ok(()),
             || panic!(),
+            || panic!(),
         )
         .unwrap();
         let mut r = load_record(&path, &p).unwrap();
@@ -663,6 +881,7 @@ mod persistence_tests {
             Some("web-01"),
             |_| panic!(),
             |_| panic!(),
+            || panic!(),
             || panic!(),
         )
         .unwrap();
