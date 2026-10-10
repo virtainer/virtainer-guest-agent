@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Windows: specialize sets only the hostname. Networking now runs in the
+  service phase before accounts, because the network stack's RPC services are
+  not available during specialize.
+- Windows: accepted vsock connections are no longer switched with `FIONBIO`,
+  which left viosock sockets non-blocking and made the agent drop connections
+  that had no data pending. The listener stays blocking and is polled with a
+  timeout so a service stop is still noticed.
+- Windows: an existing read-only `administrators_authorized_keys` (or any other
+  file the agent rewrites) no longer blocks provisioning.
+- Windows: a failed PowerShell step records its error category, ID and message
+  (administrator password removed, 300 characters at most) instead of only an
+  exit status.
+
 ## 0.2.1
 
 No change in what the agent does on a guest. This release carries the test

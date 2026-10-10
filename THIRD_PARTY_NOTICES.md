@@ -39,7 +39,7 @@ the qemu-ga that each test image ships.
 
 ## Statically linked runtime code
 
-The binary is built for `x86_64-unknown-linux-musl` and links the following,
+The Linux binary is built for `x86_64-unknown-linux-musl` and links the following,
 all under permissive licenses. Each licence text and copyright notice is
 reproduced in the files named below.
 
@@ -56,3 +56,7 @@ reproduced in the files named below.
 crates (`serde_derive`, `syn`, `quote`, `proc-macro2`, `unicode-ident`),
 which are not linked into the binary. `cargo tree -e normal --target
 x86_64-unknown-linux-musl` shows the dependency graph.
+
+The Windows build uses the same Rust and crate licence notices. Its Win32 and
+Winsock bindings call installed system DLLs and the installed viosock provider
+through public interfaces; no Windows driver or provider source is bundled.

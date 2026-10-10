@@ -1,10 +1,12 @@
 # Virtainer Guest Agent — a modern, vsock-native guest agent that speaks the QEMU Guest Agent protocol
 
 The Virtainer Guest Agent is a QEMU Guest Agent (QGA, qemu-ga) compatible agent
-for x86_64 Linux VMs on Cloud Hypervisor, from [Virtainer](https://virtainer.io):
-one static binary (about 1 MB, no runtime dependencies), reached by the host
-over vsock, that installs itself in systemd and OpenRC guests. It is the guest
-component of the Virtainer virtualization platform for classic VMs.
+for x86_64 Linux and Windows VMs on Cloud Hypervisor, from [Virtainer](https://virtainer.io).
+The Linux build is one static binary (about 1 MB, no runtime dependencies),
+reached by the host over vsock, that installs itself in systemd and OpenRC guests.
+The Windows MVP runs as an auto-start LocalSystem service through virtio-win's
+viosock Winsock provider and provisions Windows guests from a raw FAT12 seed.
+It is the guest component of the Virtainer virtualization platform for classic VMs.
 
 It replaces installing `qemu-guest-agent` in every guest, which needs internet
 access at first boot, per-distro package names, unit overrides and SELinux
@@ -24,7 +26,7 @@ Cloud Hypervisor's virtio-console has no named virtio-serial ports.
   ASCII-only). The end-to-end suite diffs ten read-only commands against the
   qemu-ga that each guest image ships (see [Test](#test)); the rest is checked
   against the QGA documentation, not against a reference run.
-- **Commands:** every Linux command of QEMU 11.1's `qga/qapi-schema.json`,
+- **Linux commands:** every Linux command of QEMU 11.1's `qga/qapi-schema.json`,
   except the three `guest-suspend-*` commands, which behave badly on Cloud
   Hypervisor (see [Differences from qemu-ga](#differences-from-qemu-ga)).
 
@@ -74,6 +76,216 @@ Beyond qemu-ga:
   `time` it also works without an RTC; without `time` and without an RTC it
   returns an error, because there is nothing to read the time from. Under
   Cloud Hypervisor v53 the guests we booted had no usable RTC.
+
+## Windows MVP
+
+The Windows build targets Windows Server 2019, 2022 and 2025 (Core and Desktop
+Experience), and Windows 11 IoT Enterprise LTSC. It requires amd64 Windows,
+virtio-win's `viosock` driver **and its Winsock provider**, and built-in Windows
+PowerShell 5.1, CIM, LocalAccounts and NetTCPIP cmdlets. The command transport
+uses Winsock AF_VSOCK (40), port 100, and rejects every peer except CID 2 before
+starting a connection thread. The host uses the same Cloud Hypervisor hybrid
+vsock handshake and QGA framing as on Linux.
+
+These are implemented MVP paths. Cross-target check and Clippy do not establish
+Windows runtime acceptance; SCM installation, the provider, specialize, PowerShell
+provisioning and executable replacement must also be exercised in a real guest.
+
+| Group | Supported Windows commands |
+| --- | --- |
+| Session | `guest-sync`, `guest-sync-delimited`, `guest-ping`, `guest-info` |
+| Identity | `guest-get-osinfo`, `guest-get-host-name` |
+| Time and power | `guest-get-time`, `guest-set-time`, `guest-shutdown` |
+| Network | `guest-network-get-interfaces` (names, MACs, IPv4/IPv6 addresses and prefixes) |
+| Exec | `guest-exec`, `guest-exec-status` (stdin, environment, separate or merged capture) |
+| Files | `guest-file-open`, `guest-file-read`, `guest-file-write`, `guest-file-seek`, `guest-file-flush`, `guest-file-close` |
+| Accounts | `guest-set-user-password` (base64 UTF-8 password, `crypted: false`) |
+| Provisioning | `__io.virtainer_provision` |
+
+`guest-set-time` requires an explicit Unix time in nanoseconds on Windows; this
+build does not read an RTC. `guest-shutdown` accepts `powerdown`, `halt` and
+`reboot`, uses the Windows shutdown API, and sends no reply on success. In this
+MVP, `halt` also powers down. File and exec limits match the Linux limits above;
+file write modes reject a reparse point in the last path component.
+
+The known commands outside this table return the QAPI error
+`{"error": {"class": "GenericError", "desc": "Command <name> is not supported"}}`.
+This includes filesystem freeze/thaw and trim, filesystem/disk/device inventory,
+vCPU and memory commands, statistics, routes, timezone/user inventory, authorized
+key RPCs, suspend commands and `__io.virtainer_shell`. They are absent from
+`guest-info`'s supported command list. Unknown command names return
+`CommandNotFound`. VSS and ConPTY are outside this MVP; Windows snapshots are
+crash-consistent.
+
+### Windows installation and specialize
+
+Run an elevated prompt once while preparing the image:
+
+```powershell
+.\virtainer-guest-agent.exe install
+```
+
+This copies the executable into
+`%ProgramFiles%\Virtainer\GuestAgent\virtainer-guest-agent.exe`, registers
+`virtainer-guest-agent` as an auto-start LocalSystem service, and starts it.
+An unchanged executable is not rewritten or restarted. Installation also
+sets private SYSTEM/Administrators directory ACLs. Windows RPC filters use
+`%ProgramData%\Virtainer\GuestAgent\virtainer-guest-agent.conf`, with the same
+`block-rpcs` and `allow-rpcs` syntax shown below; Linux freeze settings are not
+accepted in this file. `uninstall` stops and deletes the service and removes its
+executable. When invoked from the installed executable, Windows can keep that
+file mapped; removal is then scheduled for the next reboot using
+[MoveFileExW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw).
+The command reports deferred removal; reboot before reinstalling. Provisioning
+records are kept so a reinstall cannot replay the user's script.
+
+The generalized image **must** include this entry in its unattend file's
+`specialize` pass. Setup invokes it synchronously as SYSTEM before the normal
+specialize reboot. It sets only the hostname, which takes effect with that
+reboot. The network stack's RPC services are not running during specialize, so
+network configuration waits for the service:
+
+```xml
+<settings pass="specialize">
+  <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64"
+             publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+    <RunSynchronous>
+      <RunSynchronousCommand wcm:action="add"
+          xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+        <Order>1</Order>
+        <Description>Apply Virtainer hostname and network</Description>
+        <Path>&quot;C:\Program Files\Virtainer\GuestAgent\virtainer-guest-agent.exe&quot; specialize</Path>
+      </RunSynchronousCommand>
+    </RunSynchronous>
+  </component>
+</settings>
+```
+
+Adjust the path if Windows uses a different Program Files location. The agent
+must already be installed, and the seed must already be attached when Setup
+runs this entry. An ordinary service boot leaves a new instance `pending` until
+its specialize checkpoint exists and the active Windows hostname matches the
+requested name (case-insensitive). A service restart before the specialize reboot
+keeps provisioning `pending` and defers networking, accounts and the user script. It does not
+report `done` for a rename that still needs a reboot. The service is not running
+during specialize, so the agent first answers on vsock after that reboot. Non-generalized images require the operator to arrange
+this entry point and the appropriate reboot before using the service.
+
+### Windows seed and provisioning status
+
+Attach an unpartitioned FAT12 disk containing:
+
+- `virtainer-guest-agent.exe`;
+- `virtainer-provision.json`;
+- optionally `user-script.ps1`.
+
+Windows need not mount the volume. The agent scans `\\.\PhysicalDrive0` through
+`\\.\PhysicalDrive255`, recognizes a seed by the contract filename on a valid
+FAT12 volume, decodes its long filenames, and reads it twice to establish stable
+content. Multiple matching seeds, corrupt files and inconsistent persisted state
+are refused. The reader accepts images up to 256 MiB and files up to 64 MiB,
+checks FAT geometry, FAT copies and cluster chains, and never writes the disk.
+
+The schema and field names are:
+
+```json
+{
+  "schema": 1,
+  "instance_id": "00000000-0000-4000-8000-000000000001",
+  "seed_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "hostname": "WEB-01",
+  "admin": {"username": "Administrator", "password": "REPLACE-WITH-A-STRONG-PASSWORD"},
+  "ssh_authorized_keys": ["ssh-ed25519 REPLACE-WITH-A-PUBLIC-KEY"],
+  "timezone": "UTC",
+  "network": [{"mac": "52:54:00:aa:bb:cc", "addresses": ["10.0.0.5/24"],
+               "gateway": "10.0.0.1", "dns": ["1.1.1.1"]}],
+  "user_script": "user-script.ps1"
+}
+```
+
+`instance_id` is a canonical lowercase UUID; `seed_version` is the host-supplied
+64-digit SHA-256 content identifier, returned unchanged. The agent checks stable
+raw content; it does not independently recompute that identifier (the document
+itself contains it). Hostnames use the NetBIOS form, at most 15 ASCII letters,
+digits or hyphens, and cannot be all digits or start/end with a hyphen. Static
+IPv4/IPv6 addresses are selected by MAC; an empty `network` selects DHCP on all
+hardware adapters. A MAC-selected entry with empty `addresses` selects DHCP on
+that adapter. Both DHCP paths remove manual IPv4/IPv6 addresses and static
+default routes, enable DHCP for both families and IPv6 router discovery, and
+reset DNS to automatic configuration.
+Duplicate MACs, invalid CIDRs/IPs, unknown fields and other schema mistakes are
+rejected before changes. `user_script`, when supplied, must be exactly
+`user-script.ps1`.
+
+Specialize applies the hostname. At service startup the agent updates
+itself if the seed executable differs, then configures networking, creates or
+enables the requested local administrator and sets its password, writes
+`%ProgramData%\ssh\administrators_authorized_keys` with SYSTEM/Administrators-only
+ACLs, sets the Windows timezone ID, and runs the optional PowerShell script as
+SYSTEM (UTF-8 seed scripts receive a Unicode BOM for Windows PowerShell 5.1).
+OpenSSH installation and enabling its service remain image preparation
+steps. Credentials go to fixed PowerShell code on stdin, never on the command
+line; records and helper error messages contain no credentials or script output.
+When a PowerShell step fails, the recorded error holds that step's PowerShell
+error category, error ID and message, with the administrator password removed
+and the text limited to 300 characters; the same text goes to the agent log.
+
+Records under `%ProgramData%\Virtainer\GuestAgent\instances` survive reboot.
+Each instance's completed provisioning is retained, including when a different
+instance later uses the image. A changed seed for an already completed instance
+does not reapply its configuration or replay its script. Interrupted system
+provisioning is `failed` with an unknown outcome and is not automatically retried.
+The script is checkpointed before starting; failure or interruption is recorded
+in `errors`, but does not block `done` and does not cause replay. Helpers have a
+120-second limit; the user script has a 30-minute limit. An operator must resolve
+failed/uncertain system steps before preparing a new instance.
+
+Request provisioning status without arguments:
+
+```json
+{"execute": "__io.virtainer_provision"}
+```
+
+Its return object contains exactly `instance_id`, `seed_version`, `state`
+(`pending`, `applying`, `done` or `failed`), `errors` and `agent_version`.
+Before any instance is known, the first two fields are `null`. The last record
+remains available after seed removal. Host readiness and seed removal must wait
+for this instance's `done` and matching `seed_version`; ICMP is not the readiness
+signal.
+
+Boot-time updates copy the installed, working executable to `virtainer-guest-agent.updater.exe`
+and stage the replacement separately as `virtainer-guest-agent.next.exe`. The
+service stops after launching the updater. The updater runs the installed version's
+code, waits for the service to stop, copies the installed binary to
+`virtainer-guest-agent.previous.exe`, atomically replaces the installed
+executable and restarts through SCM. The installed path remains present until
+atomic replacement, including if the updater exits or Windows reboots after the
+backup copy. A backup copy failure restarts the existing service. Startup is
+confirmed within 60 seconds by observing two continuous seconds of SCM
+`RUNNING`; the service publishes that state only after opening its vsock listener.
+A replacement or startup failure attempts rollback. Before launching the helper,
+the agent persists the instance ID, seed version and exact executable bytes in
+`%ProgramData%\Virtainer\GuestAgent\failed-update`. This checkpoint also covers
+helper crashes; it is retained on failure and written again before restarting
+the fallback. The same input is suppressed across service restarts and reboots,
+so the fallback can serve and provision without repeating the failed update.
+Changed instance, seed version or executable bytes permit a new attempt.
+Successful confirmed startup clears the checkpoint. To retry unchanged input
+after correcting the failure, run these commands in an elevated PowerShell:
+
+```powershell
+Stop-Service virtainer-guest-agent
+& "$env:ProgramFiles\Virtainer\GuestAgent\virtainer-guest-agent.exe" retry-update
+Start-Service virtainer-guest-agent
+```
+
+`retry-update` requires the service to be stopped. This is trusted-seed, unsigned delivery;
+attach the seed read-only and treat its executable, password and script as
+privileged input. Authenticated live updates are outside the MVP.
+
+The transport ABI follows [virtio-win's public viosock interface](https://github.com/virtio-win/kvm-guest-drivers-windows/blob/master/viosock/sys/public.h).
+The Windows address layout follows its [socket ABI header](https://github.com/virtio-win/kvm-guest-drivers-windows/blob/master/viosock/inc/vio_sockets.h).
+Command field semantics follow the [QGA protocol reference](https://www.qemu.org/docs/master/interop/qemu-ga-ref.html).
 
 ## Differences from qemu-ga
 
