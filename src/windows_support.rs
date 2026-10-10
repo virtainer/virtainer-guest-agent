@@ -18,4 +18,7 @@ pub mod transport;
 pub mod lifecycle;
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub mod update;
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub mod network;

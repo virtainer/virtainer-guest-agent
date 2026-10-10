@@ -18,8 +18,12 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
+#[cfg(target_os = "linux")]
 use std::os::fd::{AsFd, AsRawFd};
+#[cfg(target_os = "linux")]
 use std::os::unix::process::ExitStatusExt;
+#[cfg(target_os = "windows")]
+use std::os::windows::io::AsRawHandle;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -45,6 +49,7 @@ const MAX_TRACKED: usize = 128;
 /// How long after the child exits its output pipes may stay open.
 const PIPE_GRACE: Duration = Duration::from_secs(2);
 /// How often a drain thread checks whether it has been told to let go.
+#[cfg(target_os = "linux")]
 const DRAIN_POLL_MS: i32 = 250;
 
 type Slot = Mutex<Option<Finished>>;
@@ -191,10 +196,16 @@ struct Drain {
     ended: mpsc::Receiver<()>,
 }
 
-fn spawn_drain(
-    mut pipe: impl Read + AsFd + Send + 'static,
-    budget: Arc<Budget>,
-) -> io::Result<Drain> {
+#[cfg(target_os = "linux")]
+trait Pipe: Read + AsFd {}
+#[cfg(target_os = "linux")]
+impl<T: Read + AsFd> Pipe for T {}
+#[cfg(target_os = "windows")]
+trait Pipe: Read + AsRawHandle {}
+#[cfg(target_os = "windows")]
+impl<T: Read + AsRawHandle> Pipe for T {}
+
+fn spawn_drain(mut pipe: impl Pipe + Send + 'static, budget: Arc<Budget>) -> io::Result<Drain> {
     let shared = Arc::new(Mutex::new(Captured::new(budget)));
     let (ended_tx, ended) = mpsc::channel::<()>();
     let state = shared.clone();
@@ -207,12 +218,23 @@ fn spawn_drain(
                 if state.lock().unwrap_or_else(|p| p.into_inner()).closed {
                     return;
                 }
+                #[cfg(target_os = "windows")]
+                match sys::pipe_ready(pipe.as_raw_handle()) {
+                    Ok(false) => {
+                        std::thread::sleep(Duration::from_millis(20));
+                        continue;
+                    }
+                    Err(_) => return,
+                    Ok(true) => {}
+                }
+                #[cfg(target_os = "linux")]
                 let mut pfd = libc::pollfd {
                     fd: pipe.as_fd().as_raw_fd(),
                     events: libc::POLLIN,
                     revents: 0,
                 };
                 // SAFETY: pfd is a valid pollfd and the count is 1.
+                #[cfg(target_os = "linux")]
                 match unsafe { libc::poll(&mut pfd, 1, DRAIN_POLL_MS) } {
                     0 => continue,
                     r if r < 0
@@ -281,7 +303,11 @@ pub fn exec(ctx: &mut Ctx<'_>, mut args: Args) -> Reply {
 
     let input = input.map(|data| decode_base64(&data)).transpose()?;
     let mut command = Command::new(&path);
-    command.args(&argv).current_dir("/");
+    command.args(&argv);
+    #[cfg(target_os = "linux")]
+    command.current_dir("/");
+    #[cfg(target_os = "windows")]
+    command.current_dir(sys::system_dir());
     if let Some(env) = env {
         command.env_clear();
         for entry in env {
@@ -457,7 +483,9 @@ pub fn exec_status(ctx: &mut Ctx<'_>, mut args: Args) -> Reply {
         Ok(status) => {
             if let Some(code) = status.code() {
                 reply.insert("exitcode".into(), json!(code));
-            } else if let Some(signal) = status.signal() {
+            }
+            #[cfg(target_os = "linux")]
+            if let Some(signal) = status.signal() {
                 reply.insert("signal".into(), json!(signal));
             }
         }
@@ -481,7 +509,7 @@ pub fn exec_status(ctx: &mut Ctx<'_>, mut args: Args) -> Reply {
     Ok(Value::Object(reply))
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use crate::agent::Agent;

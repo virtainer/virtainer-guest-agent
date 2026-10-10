@@ -158,6 +158,7 @@ impl Args {
         self.opt_int(member)?.ok_or_else(|| self.missing(member))
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub fn uint(&mut self, member: &str) -> Result<u64, QgaError> {
         let value = self.take(member).ok_or_else(|| self.missing(member))?;
         match value.as_u64().or_else(|| value.as_i64().map(|v| v as u64)) {
@@ -198,12 +199,14 @@ impl Args {
             .map(Some)
     }
 
+    #[cfg(target_os = "linux")]
     pub fn str_list(&mut self, member: &str) -> Result<Vec<String>, QgaError> {
         self.opt_str_list(member)?
             .ok_or_else(|| self.missing(member))
     }
 
     /// A required list of objects; `visit` reads each element's members.
+    #[cfg(any(target_os = "linux", test))]
     pub fn object_list<T>(
         &mut self,
         member: &str,

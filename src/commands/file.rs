@@ -14,10 +14,13 @@
 //! guest user.
 
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
 use std::ffi::CString;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+#[cfg(target_os = "linux")]
 use std::os::fd::{FromRawFd, IntoRawFd};
+#[cfg(target_os = "linux")]
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -35,6 +38,7 @@ const READ_COUNT_DEFAULT: i64 = 4096;
 /// Open handles share RLIMIT_NOFILE with exec pipes; stay well below a
 /// 1024 soft limit.
 const MAX_OPEN_FILES: usize = 256;
+#[cfg(target_os = "linux")]
 const NEW_FILE_MODE: libc::mode_t = 0o644;
 
 pub struct FileTable {
@@ -96,6 +100,7 @@ fn not_found(handle: i64) -> QgaError {
 }
 
 /// fopen(3) modes, as qemu-ga accepts them.
+#[cfg(target_os = "linux")]
 fn open_flags(mode: &str) -> Option<i32> {
     use libc::{O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
     let flags = match mode {
@@ -110,6 +115,7 @@ fn open_flags(mode: &str) -> Option<i32> {
     Some(flags | libc::O_NOCTTY | libc::O_NONBLOCK | libc::O_CLOEXEC)
 }
 
+#[cfg(target_os = "linux")]
 fn open_path(path: &CString, flags: i32, mode: libc::mode_t) -> io::Result<File> {
     // SAFETY: path is NUL-terminated; open returns a new fd or -1.
     let fd = unsafe { libc::open(path.as_ptr(), flags, mode as libc::c_uint) };
@@ -125,6 +131,7 @@ fn open_path(path: &CString, flags: i32, mode: libc::mode_t) -> io::Result<File>
 /// existing file is opened as is and keeps its mode. The fallback does not
 /// follow a symlink: a guest user could otherwise plant one at a predictable
 /// path and have a root-owned open truncate or append to its target.
+#[cfg(target_os = "linux")]
 fn open_or_create(path: &str, flags: i32) -> io::Result<File> {
     let c_path = sys::cstring(Path::new(path))?;
     if flags & libc::O_CREAT == 0 {
@@ -153,11 +160,15 @@ pub fn open(ctx: &mut Ctx<'_>, mut args: Args) -> Reply {
     let path = args.str("path")?;
     let mode = args.opt_str("mode")?.unwrap_or_else(|| "r".into());
     args.finish()?;
+    #[cfg(target_os = "linux")]
     let flags = open_flags(&mode)
         .ok_or_else(|| QgaError::generic(format!("invalid file open mode '{mode}'")))?;
     crate::info!("guest-file-open called, filepath: {path}, mode: {mode}");
+    #[cfg(target_os = "linux")]
     let file = open_or_create(&path, flags)
         .map_err(|e| QgaError::os(format!("failed to open file '{path}' (mode: '{mode}')"), &e))?;
+    #[cfg(target_os = "windows")]
+    let file = sys::open_file(&path, &mode)?;
     let handle = ctx.agent.files.insert(file)?;
     Ok(json!(handle))
 }
@@ -168,6 +179,9 @@ pub fn close(ctx: &mut Ctx<'_>, mut args: Args) -> Reply {
     let file = ctx.agent.files.remove(handle)?;
     // Another connection may still be mid-read on this handle; it finishes
     // with its own reference and the fd closes when the last one drops.
+    #[cfg(target_os = "windows")]
+    drop(file);
+    #[cfg(target_os = "linux")]
     if let Some(file) = Arc::into_inner(file) {
         let fd = file
             .into_inner()
@@ -316,7 +330,7 @@ pub fn flush(ctx: &mut Ctx<'_>, mut args: Args) -> Reply {
     Ok(json!({}))
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use crate::agent::Agent;

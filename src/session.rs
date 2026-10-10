@@ -9,7 +9,17 @@
 //! and is dropped.
 
 use std::io::{self, Read, Write};
+#[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
+
+#[cfg(target_os = "linux")]
+pub trait Stream: Read + Write + AsRawFd {}
+#[cfg(target_os = "linux")]
+impl<T: Read + Write + AsRawFd> Stream for T {}
+#[cfg(target_os = "windows")]
+pub trait Stream: Read + Write {}
+#[cfg(target_os = "windows")]
+impl<T: Read + Write> Stream for T {}
 
 use serde_json::Value;
 
@@ -22,12 +32,11 @@ use crate::qmp::QgaError;
 /// Serve requests until the peer closes the stream. `slot` is this
 /// connection's place among the QGA connections; it is given up when the
 /// connection becomes a Shell session.
-pub fn serve<S: Read + Write + AsRawFd, G>(
-    agent: &Agent,
-    mut stream: S,
-    slot: G,
-) -> io::Result<()> {
+pub fn serve<S: Stream, G>(agent: &Agent, mut stream: S, slot: G) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
     let mut slot = Some(slot);
+    #[cfg(target_os = "windows")]
+    let _slot = slot;
     let mut framer = Framer::default();
     let mut ctx = Ctx::new(agent);
     let mut buf = vec![0u8; 64 * 1024];
@@ -56,6 +65,7 @@ pub fn serve<S: Read + Write + AsRawFd, G>(
                     if let Some(reply) = reply {
                         send(&mut stream, &mut ctx, &reply)?;
                     }
+                    #[cfg(target_os = "linux")]
                     if let Some(session) = ctx.upgrade.take() {
                         drop(slot.take());
                         crate::shell::relay(session, &mut stream);
@@ -91,7 +101,7 @@ fn send<S: Write>(stream: &mut S, ctx: &mut Ctx<'_>, reply: &Value) -> io::Resul
     stream.flush()
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use crate::config::Config;

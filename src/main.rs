@@ -1,35 +1,51 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Virtainer authors
 
-//! Virtainer guest agent: a QEMU Guest Agent compatible agent for Linux VMs
+//! Virtainer guest agent: a QEMU Guest Agent compatible agent for virtual machines
 //! on Cloud Hypervisor, reached by the host over vsock.
 
+#[cfg(target_os = "linux")]
 mod agent;
+#[cfg(target_os = "linux")]
 mod autoonline;
+#[cfg(target_os = "linux")]
 mod commands;
+#[cfg(target_os = "linux")]
 mod config;
 mod framer;
+#[cfg(target_os = "linux")]
 mod install;
 mod json;
+#[cfg(target_os = "linux")]
 mod log;
+#[cfg(target_os = "linux")]
 mod pty;
 mod qmp;
+#[cfg(target_os = "linux")]
 mod server;
 mod session;
+#[cfg(target_os = "linux")]
 mod shell;
+#[cfg(target_os = "linux")]
 mod sys;
+#[cfg(target_os = "linux")]
 mod vsock;
-#[cfg(any(target_os = "windows", test))]
-mod windows_support;
 
+#[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicI32, Ordering};
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
 use agent::Agent;
+#[cfg(target_os = "linux")]
 use config::Config;
 
+#[cfg(target_os = "linux")]
 const USAGE: &str = "\
 usage: virtainer-guest-agent [COMMAND]
 
@@ -57,6 +73,7 @@ const LICENSES: &str = concat!(
     include_str!("../LICENSES/THIRD-PARTY-RUST.txt"),
 );
 
+#[cfg(target_os = "linux")]
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str).unwrap_or("run");
@@ -76,11 +93,13 @@ fn main() {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn fail_usage(message: &str) -> ! {
     eprintln!("virtainer-guest-agent: {message}\n\n{USAGE}");
     std::process::exit(2);
 }
 
+#[cfg(target_os = "linux")]
 fn exit_with(result: Result<(), String>) {
     if let Err(e) = result {
         eprintln!("virtainer-guest-agent: {e}");
@@ -88,6 +107,7 @@ fn exit_with(result: Result<(), String>) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn run() {
     log::init();
     let config = match Config::load(Path::new(config::PATH)) {
@@ -154,8 +174,10 @@ fn run() {
 }
 
 /// Write end of the pipe the signal handler reports into.
+#[cfg(target_os = "linux")]
 static SIGNAL_WRITER: AtomicI32 = AtomicI32::new(-1);
 
+#[cfg(target_os = "linux")]
 extern "C" fn on_signal(signal: libc::c_int) {
     // SAFETY: errno is thread-local and saved around write(2), the only
     // call here, which is async-signal-safe.
@@ -177,6 +199,7 @@ extern "C" fn on_signal(signal: libc::c_int) {
 /// inherited by every thread and, through them, by every process the agent
 /// starts (Rust's spawn keeps the parent's mask), so guest-exec children
 /// would ignore SIGTERM. Handlers are reset to the default on exec.
+#[cfg(target_os = "linux")]
 fn signal_pipe() -> OwnedFd {
     let mut fds = [0; 2];
     // SAFETY: fds has room for the two descriptors pipe2 returns.
@@ -197,4 +220,31 @@ fn signal_pipe() -> OwnedFd {
     }
     // SAFETY: fds[0] is the read end just created, owned from here on.
     unsafe { OwnedFd::from_raw_fd(fds[0]) }
+}
+
+#[cfg(target_os = "windows")]
+#[path = "windows/agent.rs"]
+mod agent;
+#[cfg(target_os = "windows")]
+#[path = "windows/commands.rs"]
+mod commands;
+#[cfg(target_os = "windows")]
+#[path = "windows/config.rs"]
+mod config;
+#[cfg(target_os = "windows")]
+#[path = "windows/log.rs"]
+mod log;
+#[cfg(target_os = "windows")]
+#[path = "windows/sys.rs"]
+mod sys;
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(any(target_os = "windows", test))]
+mod windows_support;
+#[cfg(target_os = "windows")]
+fn main() {
+    if let Err(error) = windows::main() {
+        eprintln!("virtainer-guest-agent: {error}");
+        std::process::exit(1);
+    }
 }
