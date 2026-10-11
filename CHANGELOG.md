@@ -1,7 +1,27 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
+First release with Windows guest support (Windows Server 2019, 2022 and
+2025, and Windows 11 IoT Enterprise LTSC). On Windows the agent runs as a
+LocalSystem service that speaks QGA to the host over vsock port 100 through
+virtio-win's viosock provider, and provisions the guest from a FAT12 seed:
+host name, network, accounts and SSH keys, optionally disabling the
+built-in Administrator. The Linux agent behaves as in 0.2.1.
+
+- Windows: a LocalSystem service serving the session, identity, time and
+  power, network-interface and `guest-exec` commands listed in the README,
+  with the same hybrid vsock handshake and framing as on Linux.
+- Windows: provisioning from a FAT12 seed read without mounting it. The seed
+  is checked against a strict schema, and per-instance checkpoints let a
+  restart resume where it stopped. It sets the host name, network, time
+  zone, accounts and SSH keys. The seed can also stage an agent update,
+  kept with a backup to roll back to.
+- Windows: `admin.disable_builtin` in the seed disables the built-in
+  Administrator once the requested administrator exists. The account is
+  found by SID, so a renamed or localized one is covered too.
+- Windows: an interface that already has DHCP and a lease keeps it during
+  network provisioning instead of falling back to APIPA.
 - Windows: specialize sets only the hostname. Networking now runs in the
   service phase before accounts, because the network stack's RPC services are
   not available during specialize.
