@@ -2,13 +2,27 @@
 # Copyright 2026 The Virtainer authors
 
 function Reset-VirtainerDhcp([uint32]$index) {
+    $renew = $null
     foreach ($family in @('IPv4', 'IPv6')) {
         Get-NetIPAddress -InterfaceIndex $index -AddressFamily $family -ErrorAction SilentlyContinue |
             Where-Object { $_.PrefixOrigin -eq 'Manual' -and $_.IPAddress -notlike 'fe80:*' } | Remove-NetIPAddress -Confirm:$false
         $destination = if ($family -eq 'IPv4') { '0.0.0.0/0' } else { '::/0' }
         Get-NetRoute -InterfaceIndex $index -DestinationPrefix $destination -ErrorAction SilentlyContinue |
             Where-Object { $_.Protocol -eq 'NetMgmt' } | Remove-NetRoute -Confirm:$false
-        Set-NetIPInterface -InterfaceIndex $index -AddressFamily $family -Dhcp Enabled
+        # Re-applying Enabled to an interface that already has DHCP drops its
+        # lease back to APIPA, and Windows then stops sending DISCOVER.
+        $current = Get-NetIPInterface -InterfaceIndex $index -AddressFamily $family -ErrorAction SilentlyContinue
+        if ($current -and $current.Dhcp -ne 'Enabled') {
+            Set-NetIPInterface -InterfaceIndex $index -AddressFamily $family -Dhcp Enabled
+            if ($family -eq 'IPv4') { $renew = $current.InterfaceAlias }
+        } elseif (-not $current) {
+            Set-NetIPInterface -InterfaceIndex $index -AddressFamily $family -Dhcp Enabled
+        }
+    }
+    # Renew in the background: with no DHCP server reachable, a synchronous
+    # renew waits out its retries and would hold up the rest of provisioning.
+    if ($renew) {
+        Start-Process -FilePath ipconfig.exe -ArgumentList '/renew', ('"{0}"' -f $renew) -WindowStyle Hidden
     }
     Set-NetIPInterface -InterfaceIndex $index -AddressFamily IPv6 -RouterDiscovery Enabled
     Set-DnsClientServerAddress -InterfaceIndex $index -ResetServerAddresses
