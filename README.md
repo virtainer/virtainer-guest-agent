@@ -169,7 +169,9 @@ requested name (case-insensitive). A service restart before the specialize reboo
 keeps provisioning `pending` and defers networking, accounts and the user script. It does not
 report `done` for a rename that still needs a reboot. When the service finds
 the requested name set but not yet active after specialize (Windows Server 2019),
-it restarts Windows itself, once per provisioning: it records the restart first,
+it restarts Windows itself, once per provisioning: it records the restart first
+(in a `<instance>.restart` file next to the record, so earlier agents can
+still read the record),
 waits until Windows setup after sysprep (`HKLM\SYSTEM\Setup`
 `SystemSetupInProgress`/`OOBEInProgress`) has finished, logs the reason, and
 restarts with a comment that Windows records in the System log (event 1074).

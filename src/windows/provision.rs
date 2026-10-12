@@ -124,10 +124,14 @@ fn load(p: &Provision) -> Result<Record, String> {
     crate::windows_support::provision::load_record(&path, p)
 }
 fn save(r: &Record) -> Result<(), String> {
-    atomic_write(
-        &state_dir().join(format!("{}.json", r.instance_id)),
-        &serde_json::to_vec(r).map_err(|e| e.to_string())?,
-    )
+    let path = state_dir().join(format!("{}.json", r.instance_id));
+    if r.hostname_restart {
+        atomic_write(
+            &crate::windows_support::provision::restart_marker(&path),
+            b"1",
+        )?;
+    }
+    atomic_write(&path, &serde_json::to_vec(r).map_err(|e| e.to_string())?)
 }
 pub fn last_report() -> Result<Value, String> {
     let current = match std::fs::read_to_string(data_dir().join("current-instance")) {

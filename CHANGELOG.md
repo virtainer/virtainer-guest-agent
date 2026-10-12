@@ -5,8 +5,9 @@
 - Windows: when the requested host name is set but not yet active at the
   first service start after specialize (Windows Server 2019), the agent
   restarts Windows once per provisioning, after Windows setup has finished,
-  and then completes provisioning. The restart is recorded before it happens,
-  logged, and carries a comment in the System log (event 1074). Before, such a
+  and then completes provisioning. The restart is recorded before it happens
+  in a file separate from the provisioning record (which keeps its 0.3.0
+  format), logged, and carries a comment in the System log (event 1074). Before, such a
   VM stayed `pending` until someone restarted it.
 
 ## 0.3.0

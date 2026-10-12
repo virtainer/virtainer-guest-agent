@@ -214,10 +214,12 @@ pub struct Record {
     #[serde(default)]
     pub builtin_admin_requested: bool,
     /// Windows was restarted once to make the requested computer name active.
-    /// Set before the restart; never repeated for this provisioning. Written
-    /// only when set, so records that never needed it stay readable by
-    /// agents that predate it.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// Set before the restart; never repeated for this provisioning. Not part
+    /// of the record's JSON, which stays readable by earlier agents: it lives
+    /// in the marker file next to the record ([`restart_marker`]), which
+    /// [`load_record`] reads and the caller's `save` must write before the
+    /// record when this is set.
+    #[serde(skip)]
     pub hostname_restart: bool,
 }
 #[derive(Clone, Copy)]
@@ -580,6 +582,24 @@ mod tests {
             .unwrap()
             .get("hostname_restart")
             .is_none());
+        // The 0.3.0 record schema is unchanged even after a restart checkpoint.
+        let mut restarted = r.clone();
+        restarted.hostname_restart = true;
+        let value = serde_json::to_value(&restarted).unwrap();
+        let old_fields = [
+            "instance_id",
+            "seed_version",
+            "state",
+            "errors",
+            "specialized",
+            "configured",
+            "script",
+            "script_requested",
+            "builtin_admin",
+            "builtin_admin_requested",
+        ];
+        assert_eq!(value.as_object().unwrap().len(), old_fields.len());
+        assert!(old_fields.iter().all(|k| value.get(k).is_some()));
     }
     #[test]
     fn active_hostname_gates_accounts_and_script_across_service_restarts() {
@@ -587,6 +607,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         let save = |r: &Record| {
+            if r.hostname_restart {
+                std::fs::write(restart_marker(&path), b"1").map_err(|e| e.to_string())?;
+            }
             std::fs::write(&path, serde_json::to_vec(r).unwrap()).map_err(|e| e.to_string())
         };
         let mut r = Record::new(&p);
@@ -884,11 +907,22 @@ mod tests {
 /// Read a bounded, credential-free record. Missing state is a new instance;
 /// unreadable or corrupt state must never be interpreted as a fresh boot.
 pub fn load_record(path: &std::path::Path, p: &Provision) -> Result<Record, String> {
-    match std::fs::File::open(path) {
-        Ok(file) => read_record(file, &p.instance_id),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Record::new(p)),
-        Err(_) => Err("cannot read persisted provisioning record".into()),
-    }
+    let mut record = match std::fs::File::open(path) {
+        Ok(file) => read_record(file, &p.instance_id)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Record::new(p),
+        Err(_) => return Err("cannot read persisted provisioning record".into()),
+    };
+    record.hostname_restart = restart_marker(path)
+        .try_exists()
+        .map_err(|_| "cannot read persisted provisioning record".to_string())?;
+    Ok(record)
+}
+
+/// The hostname-restart checkpoint of the record at `record_path`. A separate
+/// file keeps the record schema unchanged, so an agent restored by a failed
+/// update still reads the record.
+pub fn restart_marker(record_path: &std::path::Path) -> std::path::PathBuf {
+    record_path.with_extension("restart")
 }
 
 /// Reads a persisted record, bounded in size, and checks that it belongs to
@@ -934,6 +968,9 @@ mod persistence_tests {
         assert_eq!(load_record(&path, &p).unwrap().state, State::Pending);
         let mut r = Record::new(&p);
         let save = |r: &Record| {
+            if r.hostname_restart {
+                std::fs::write(restart_marker(&path), b"1").map_err(|e| e.to_string())?;
+            }
             std::fs::write(&path, serde_json::to_vec(r).unwrap()).map_err(|e| e.to_string())
         };
         r.apply(
