@@ -1,9 +1,38 @@
-# SPDX-License-Identifier: Apache-2.0
-# Copyright 2026 The Virtainer authors
+# Binding of the IP stack to an adapter can lag the first service start after
+# specialize, and a family can be unbound on an adapter altogether. The
+# MSFT_NetIPInterface object is then absent and Set-NetIPInterface can only
+# fail, so every family is looked up first. One shared deadline bounds the
+# waiting for the whole script, so many unbound families cannot add up.
+$netIpWaitSeconds = 60
+$netIpPollSeconds = 2
+$netIpDeadline = $null
+
+function Write-VirtainerWarning([string]$message) {
+    [Console]::Out.WriteLine('VIRTAINER-HELPER-WARNING|' + ($message -replace '[\r\n]+', ' '))
+}
+
+function Wait-VirtainerNetIPInterface([uint32]$index, [string]$family) {
+    if ($null -eq $script:netIpDeadline) {
+        $script:netIpDeadline = (Get-Date).AddSeconds($netIpWaitSeconds)
+    }
+    while ($true) {
+        $found = Get-NetIPInterface -InterfaceIndex $index -AddressFamily $family -ErrorAction SilentlyContinue
+        if ($found) { return $found }
+        if ((Get-Date) -ge $script:netIpDeadline) { return $null }
+        Start-Sleep -Seconds $netIpPollSeconds
+    }
+}
 
 function Reset-VirtainerDhcp([uint32]$index) {
     $renew = $null
+    $present = @()
     foreach ($family in @('IPv4', 'IPv6')) {
+        $current = Wait-VirtainerNetIPInterface $index $family
+        if (-not $current) {
+            Write-VirtainerWarning ('adapter ifIndex {0} has no {1} interface; skipping {1} DHCP configuration' -f $index, $family)
+            continue
+        }
+        $present += $family
         Get-NetIPAddress -InterfaceIndex $index -AddressFamily $family -ErrorAction SilentlyContinue |
             Where-Object { $_.PrefixOrigin -eq 'Manual' -and $_.IPAddress -notlike 'fe80:*' } | Remove-NetIPAddress -Confirm:$false
         $destination = if ($family -eq 'IPv4') { '0.0.0.0/0' } else { '::/0' }
@@ -11,12 +40,12 @@ function Reset-VirtainerDhcp([uint32]$index) {
             Where-Object { $_.Protocol -eq 'NetMgmt' } | Remove-NetRoute -Confirm:$false
         # Re-applying Enabled to an interface that already has DHCP drops its
         # lease back to APIPA, and Windows then stops sending DISCOVER.
-        $current = Get-NetIPInterface -InterfaceIndex $index -AddressFamily $family -ErrorAction SilentlyContinue
-        if ($current -and $current.Dhcp -ne 'Enabled') {
+        if ($current.Dhcp -ne 'Enabled') {
             Set-NetIPInterface -InterfaceIndex $index -AddressFamily $family -Dhcp Enabled
             if ($family -eq 'IPv4') { $renew = $current.InterfaceAlias }
-        } elseif (-not $current) {
-            Set-NetIPInterface -InterfaceIndex $index -AddressFamily $family -Dhcp Enabled
+        }
+        if ($family -eq 'IPv6') {
+            Set-NetIPInterface -InterfaceIndex $index -AddressFamily IPv6 -RouterDiscovery Enabled
         }
     }
     # Renew in the background: with no DHCP server reachable, a synchronous
@@ -24,11 +53,16 @@ function Reset-VirtainerDhcp([uint32]$index) {
     if ($renew) {
         Start-Process -FilePath ipconfig.exe -ArgumentList '/renew', ('"{0}"' -f $renew) -WindowStyle Hidden
     }
-    Set-NetIPInterface -InterfaceIndex $index -AddressFamily IPv6 -RouterDiscovery Enabled
-    Set-DnsClientServerAddress -InterfaceIndex $index -ResetServerAddresses
+    if ($present.Count) { Set-DnsClientServerAddress -InterfaceIndex $index -ResetServerAddresses }
 }
 
 $adapters = @(Get-NetAdapter -IncludeHidden)
+function Require-VirtainerNetIPInterface([uint32]$index, [string]$mac, [string]$family) {
+    if (-not (Wait-VirtainerNetIPInterface $index $family)) {
+        throw ('adapter {0} has no {1} interface; cannot apply the requested static {1} configuration' -f $mac, $family)
+    }
+}
+
 function Find-VirtainerAdapter([string]$mac) {
     $matching = @($adapters | Where-Object { $_.MacAddress -and $_.MacAddress.Replace('-', ':') -ieq $mac })
     if ($matching.Count -ne 1) { throw 'MAC must resolve to exactly one adapter' }
@@ -49,6 +83,7 @@ foreach ($n in $p.static) {
     foreach ($family in @('IPv4', 'IPv6')) {
         $addresses = @($n.addresses | Where-Object { ([ipaddress]($_.Split('/')[0])).AddressFamily.ToString() -eq $(if ($family -eq 'IPv4') { 'InterNetwork' } else { 'InterNetworkV6' }) })
         if ($addresses.Count -eq 0) { continue }
+        Require-VirtainerNetIPInterface $index $n.mac $family
         Set-NetIPInterface -InterfaceIndex $index -AddressFamily $family -Dhcp Disabled
         Get-NetIPAddress -InterfaceIndex $index -AddressFamily $family -ErrorAction SilentlyContinue |
             Where-Object { $_.IPAddress -notlike 'fe80:*' } | Remove-NetIPAddress -Confirm:$false
@@ -61,6 +96,7 @@ foreach ($n in $p.static) {
         }
     }
     if ($n.gateway) {
+        Require-VirtainerNetIPInterface $index $n.mac $(if (([ipaddress]$n.gateway).AddressFamily -eq 'InterNetwork') { 'IPv4' } else { 'IPv6' })
         $destination = if (([ipaddress]$n.gateway).AddressFamily -eq 'InterNetwork') { '0.0.0.0/0' } else { '::/0' }
         New-NetRoute -InterfaceIndex $index -DestinationPrefix $destination -NextHop $n.gateway | Out-Null
     }

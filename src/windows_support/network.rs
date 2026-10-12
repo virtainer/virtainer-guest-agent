@@ -57,4 +57,37 @@ mod tests {
             ])
         );
     }
+
+    /// The script cannot run without Windows, so these pin the structure that
+    /// the behaviour depends on.
+    #[test]
+    fn script_waits_for_the_interface_and_never_sets_an_absent_one() {
+        let ps = include_str!("../windows/network.ps1");
+        // Bounded wait: 60 s, polled every 2 s, one deadline for the script.
+        assert!(ps.contains("$netIpWaitSeconds = 60"));
+        assert!(ps.contains("$netIpPollSeconds = 2"));
+        assert!(ps.contains("Start-Sleep -Seconds $netIpPollSeconds"));
+        assert!(ps.contains("if ((Get-Date) -ge $script:netIpDeadline) { return $null }"));
+        // DHCP: an interface that never appears is skipped with a warning.
+        let dhcp =
+            &ps[ps.find("function Reset-VirtainerDhcp").unwrap()..ps.find("$adapters = ").unwrap()];
+        let wait = dhcp
+            .find("Wait-VirtainerNetIPInterface $index $family")
+            .unwrap();
+        let skip = dhcp.find("continue").unwrap();
+        let first_set = dhcp.find("Set-NetIPInterface").unwrap();
+        assert!(wait < skip && skip < first_set);
+        assert!(dhcp.contains("Write-VirtainerWarning"));
+        assert!(!dhcp.contains("elseif (-not $current)"));
+        assert!(dhcp.contains("if ($current.Dhcp -ne 'Enabled')"));
+        // Static: the interface is required, naming the MAC and family.
+        let statics = &ps[ps.find("foreach ($n in $p.static)").unwrap()..];
+        let require = statics
+            .find("Require-VirtainerNetIPInterface $index $n.mac $family")
+            .unwrap();
+        assert!(require < statics.find("Set-NetIPInterface").unwrap());
+        assert!(ps.contains("adapter {0} has no {1} interface; cannot apply the requested static"));
+        // Every Set-NetIPInterface is behind a lookup; none is unconditional.
+        assert_eq!(ps.matches("Set-NetIPInterface").count(), 4);
+    }
 }

@@ -166,6 +166,9 @@ pub fn ps(
     let _ = tx.send(());
     let out = read_thread.take().unwrap().join().unwrap_or_default();
     let status = status?;
+    for warning in crate::windows_support::helper::warnings(&out) {
+        crate::warning!("{action}: {warning}");
+    }
     if status.success() {
         Ok(out)
     } else {

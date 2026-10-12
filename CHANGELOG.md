@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Windows: network provisioning no longer fails with `Set-NetIPInterface ...
+  found no matching object` when an adapter's IPv4 or IPv6 interface does
+  not exist yet (the IP stack binds late on the first boot after specialize)
+  or is unbound. The agent waits up to 60 seconds in total for the interface,
+  then skips that family for a DHCP adapter with a logged warning. A static
+  address requested for a family the adapter lacks fails provisioning with a
+  message naming the adapter MAC and the family. Only adapters matched by
+  MAC (or all hardware adapters when the seed lists none) are touched.
+
 ## 0.3.1
 
 - Windows: when the requested host name is set but not yet active at the

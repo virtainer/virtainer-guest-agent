@@ -21,6 +21,22 @@ pub fn wrap(code: &str) -> String {
     )
 }
 
+/// Prefix of a line a helper writes to stdout for a non-fatal condition.
+pub const WARNING: &str = "VIRTAINER-HELPER-WARNING";
+/// Most warning lines kept from one helper run.
+const MAX_WARNINGS: usize = 16;
+
+/// Non-fatal conditions a helper reported, cleaned and length-bounded.
+pub fn warnings(stdout: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .filter_map(|l| l.strip_prefix(WARNING)?.strip_prefix('|'))
+        .map(|m| bound(&clean(m)))
+        .filter(|m| !m.is_empty())
+        .take(MAX_WARNINGS)
+        .collect()
+}
+
 /// Extract the failure detail from a failed helper's stdout, if it wrote one.
 /// Every occurrence of a secret is replaced, control characters and runs of
 /// whitespace collapse to one space, and the result is length-bounded.
@@ -134,5 +150,13 @@ mod tests {
         assert!(script.contains("Get-Thing\n} catch"));
         assert!(script.contains(MARKER));
         assert!(script.contains("exit 1"));
+    }
+
+    #[test]
+    fn warnings_are_collected_cleaned_and_distinct_from_errors() {
+        let out = b"noise\nVIRTAINER-HELPER-WARNING|adapter  7 has no IPv6\tinterface\r\nVIRTAINER-HELPER-WARNINGX|no\nVIRTAINER-HELPER-ERROR|A|B|c\n";
+        assert_eq!(warnings(out), vec!["adapter 7 has no IPv6 interface"]);
+        assert_eq!(failure_detail(out, &[]).unwrap(), "A: B: c");
+        assert!(warnings(b"").is_empty());
     }
 }
