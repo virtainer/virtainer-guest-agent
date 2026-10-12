@@ -11,14 +11,31 @@ function Write-VirtainerWarning([string]$message) {
     [Console]::Out.WriteLine('VIRTAINER-HELPER-WARNING|' + ($message -replace '[\r\n]+', ' '))
 }
 
+# Only a query that matched nothing means "absent". The localized message
+# text is never inspected: the CIM error category and FullyQualifiedErrorId
+# identify it. Any other error (provider or CIM failure) is not absence; it
+# is retried until the deadline and then thrown, never turned into a skip.
+function Test-VirtainerNotFound($err) {
+    return ($err.CategoryInfo.Category -eq 'ObjectNotFound') -or
+        ([string]$err.FullyQualifiedErrorId -like 'CmdletizationQuery_NotFound*')
+}
+
 function Wait-VirtainerNetIPInterface([uint32]$index, [string]$family) {
     if ($null -eq $script:netIpDeadline) {
         $script:netIpDeadline = (Get-Date).AddSeconds($netIpWaitSeconds)
     }
     while ($true) {
-        $found = Get-NetIPInterface -InterfaceIndex $index -AddressFamily $family -ErrorAction SilentlyContinue
-        if ($found) { return $found }
-        if ((Get-Date) -ge $script:netIpDeadline) { return $null }
+        $failure = $null
+        try {
+            $found = Get-NetIPInterface -InterfaceIndex $index -AddressFamily $family -ErrorAction Stop
+            if ($found) { return $found }
+        } catch {
+            if (-not (Test-VirtainerNotFound $_)) { $failure = $_ }
+        }
+        if ((Get-Date) -ge $script:netIpDeadline) {
+            if ($failure) { throw $failure }
+            return $null
+        }
         Start-Sleep -Seconds $netIpPollSeconds
     }
 }

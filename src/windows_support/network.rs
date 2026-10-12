@@ -67,7 +67,18 @@ mod tests {
         assert!(ps.contains("$netIpWaitSeconds = 60"));
         assert!(ps.contains("$netIpPollSeconds = 2"));
         assert!(ps.contains("Start-Sleep -Seconds $netIpPollSeconds"));
-        assert!(ps.contains("if ((Get-Date) -ge $script:netIpDeadline) { return $null }"));
+        assert!(ps.contains("if ((Get-Date) -ge $script:netIpDeadline) {"));
+        assert!(ps.contains("return $null"));
+        // Only a not-found result is absence; other errors are thrown, and
+        // the lookup never suppresses errors or matches message text.
+        let wait_fn = &ps[ps.find("function Wait-VirtainerNetIPInterface").unwrap()
+            ..ps.find("function Reset-VirtainerDhcp").unwrap()];
+        assert!(wait_fn.contains("-ErrorAction Stop"));
+        assert!(!wait_fn.contains("SilentlyContinue"));
+        assert!(ps.contains("CmdletizationQuery_NotFound*"));
+        assert!(ps.contains("-eq 'ObjectNotFound'"));
+        assert!(wait_fn.contains("if ($failure) { throw $failure }"));
+        assert!(!wait_fn.contains("$_.Exception.Message"));
         // DHCP: an interface that never appears is skipped with a warning.
         let dhcp =
             &ps[ps.find("function Reset-VirtainerDhcp").unwrap()..ps.find("$adapters = ").unwrap()];
