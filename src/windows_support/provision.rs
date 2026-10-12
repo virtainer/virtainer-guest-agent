@@ -213,11 +213,25 @@ pub struct Record {
     pub builtin_admin: Step,
     #[serde(default)]
     pub builtin_admin_requested: bool,
+    /// Windows was restarted once to make the requested computer name active.
+    /// Set before the restart; never repeated for this provisioning. Written
+    /// only when set, so records that never needed it stay readable by
+    /// agents that predate it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hostname_restart: bool,
 }
 #[derive(Clone, Copy)]
 pub enum Phase {
     Specialize,
     Service,
+}
+/// What the caller has to do after [`Record::apply`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum After {
+    Nothing,
+    /// Restart Windows: the requested computer name is set but not yet active.
+    /// The record already says the restart happened.
+    Restart,
 }
 
 impl Record {
@@ -233,6 +247,7 @@ impl Record {
             script_requested: p.user_script.is_some(),
             builtin_admin: Step::Pending,
             builtin_admin_requested: p.disables_builtin_admin(),
+            hostname_restart: false,
         }
     }
     pub fn report(&self) -> serde_json::Value {
@@ -281,25 +296,25 @@ impl Record {
         mut system: impl FnMut(Phase) -> Result<(), String>,
         builtin_admin: impl FnOnce() -> Result<(), String>,
         script: impl FnOnce() -> Result<(), String>,
-    ) -> Result<(), String> {
+    ) -> Result<After, String> {
         if self.instance_id != p.instance_id {
             return Err("provision instance mismatch".into());
         }
         if matches!(self.state, State::Done | State::Failed) {
-            return Ok(());
+            return Ok(After::Nothing);
         }
         if self.seed_version != p.seed_version {
             self.fail("seed changed while provisioning this instance".into());
-            return save(self);
+            return save(self).map(|()| After::Nothing);
         }
         if self.state == State::Applying && !self.configured {
             self.fail("system provisioning interrupted; outcome unknown".into());
-            return save(self);
+            return save(self).map(|()| After::Nothing);
         }
         match phase {
             Phase::Specialize => {
                 if self.specialized {
-                    return Ok(());
+                    return Ok(After::Nothing);
                 }
                 self.state = State::Applying;
                 save(self)?;
@@ -310,25 +325,32 @@ impl Record {
                     }
                     Err(e) => self.fail(e),
                 }
-                save(self)
+                save(self).map(|()| After::Nothing)
             }
             Phase::Service => {
-                if !self.specialized
-                    || p.hostname.as_deref().is_some_and(|requested| {
-                        !effective_hostname
-                            .is_some_and(|active| active.eq_ignore_ascii_case(requested))
-                    })
-                {
+                if !self.specialized {
+                    return Ok(After::Nothing);
+                }
+                if p.hostname.as_deref().is_some_and(|requested| {
+                    !effective_hostname.is_some_and(|active| active.eq_ignore_ascii_case(requested))
+                }) {
                     // An ordinary service boot must not rename the machine and
                     // claim success while the active name still needs a reboot.
-                    return Ok(());
+                    // Specialize set the name; where it is not active yet
+                    // (Server 2019), one restart makes it so.
+                    if self.hostname_restart {
+                        return Ok(After::Nothing);
+                    }
+                    self.hostname_restart = true;
+                    save(self)?;
+                    return Ok(After::Restart);
                 }
                 if !self.configured {
                     self.state = State::Applying;
                     save(self)?;
                     if let Err(e) = system(phase) {
                         self.fail(e);
-                        return save(self);
+                        return save(self).map(|()| After::Nothing);
                     }
                     self.configured = true;
                     save(self)?;
@@ -350,7 +372,7 @@ impl Record {
                     )?;
                 }
                 self.state = State::Done;
-                save(self)
+                save(self).map(|()| After::Nothing)
             }
         }
     }
@@ -553,6 +575,11 @@ mod tests {
         let r = load_record(&path, &p).unwrap();
         assert_eq!(r.builtin_admin, Step::Pending);
         assert!(!r.builtin_admin_requested);
+        assert!(!r.hostname_restart);
+        assert!(serde_json::to_value(&r)
+            .unwrap()
+            .get("hostname_restart")
+            .is_none());
     }
     #[test]
     fn active_hostname_gates_accounts_and_script_across_service_restarts() {
@@ -573,19 +600,38 @@ mod tests {
             || panic!(),
         )
         .unwrap();
-        for active in [Some("OLD-NAME"), None, Some("OLD-NAME")] {
-            let mut r = load_record(&path, &p).unwrap();
-            assert!(r.specialized);
-            r.apply(
+        // The first service boot that sees the old name asks for one restart,
+        // durably recorded before the caller restarts.
+        let mut r = load_record(&path, &p).unwrap();
+        let after = r
+            .apply(
                 &p,
                 Phase::Service,
-                active,
-                |_| panic!(),
+                Some("OLD-NAME"),
+                save,
                 |_| panic!(),
                 || panic!(),
                 || panic!(),
             )
             .unwrap();
+        assert_eq!(after, After::Restart);
+        assert!(load_record(&path, &p).unwrap().hostname_restart);
+        // Never again for this provisioning, whatever the name still is.
+        for active in [Some("OLD-NAME"), None, Some("OLD-NAME")] {
+            let mut r = load_record(&path, &p).unwrap();
+            assert!(r.specialized);
+            let after = r
+                .apply(
+                    &p,
+                    Phase::Service,
+                    active,
+                    |_| panic!(),
+                    |_| panic!(),
+                    || panic!(),
+                    || panic!(),
+                )
+                .unwrap();
+            assert_eq!(after, After::Nothing);
             assert_eq!(r.report()["state"], "pending");
             assert!(!r.configured);
             assert_eq!(r.script, Step::Pending);
@@ -613,6 +659,43 @@ mod tests {
             || panic!(),
         )
         .unwrap();
+    }
+    #[test]
+    fn an_active_requested_name_needs_no_restart() {
+        let p = config();
+        let mut r = Record::new(&p);
+        r.specialized = true;
+        let after = r
+            .apply(
+                &p,
+                Phase::Service,
+                Some("WEB-01"),
+                |_| Ok(()),
+                |_| Ok(()),
+                || panic!(),
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(after, After::Nothing);
+        assert!(!r.hostname_restart);
+        assert_eq!(r.state, State::Done);
+    }
+    #[test]
+    fn a_failed_restart_checkpoint_does_not_restart() {
+        let p = config();
+        let mut r = Record::new(&p);
+        r.specialized = true;
+        assert!(r
+            .apply(
+                &p,
+                Phase::Service,
+                Some("OLD-NAME"),
+                |_| Err("disk full".into()),
+                |_| panic!(),
+                || panic!(),
+                || panic!(),
+            )
+            .is_err());
     }
     #[test]
     fn no_requested_rename_needs_no_hostname_observation() {

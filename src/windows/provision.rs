@@ -7,7 +7,7 @@ use super::{api, data_dir};
 use crate::windows_support::{
     accounts,
     fat12::Fat12,
-    provision::{uuid, Phase, Provision, Record, State},
+    provision::{uuid, After, Phase, Provision, Record, State},
 };
 use crate::{agent::Agent, sys};
 use serde_json::{json, Value};
@@ -259,7 +259,7 @@ fn user_script(seed: &Seed) -> Result<(), String> {
     let _ = std::fs::remove_file(path);
     result
 }
-fn apply(seed: &Seed, phase: Phase, agent: Option<&Agent>) -> Result<Record, String> {
+fn apply(seed: &Seed, phase: Phase, agent: Option<&Agent>) -> Result<(Record, After), String> {
     secure_state()?;
     let _lock = sys::provision_lock(&data_dir().join("provision.lock"))?;
     let mut record = load(&seed.config)?;
@@ -295,15 +295,15 @@ fn apply(seed: &Seed, phase: Phase, agent: Option<&Agent>) -> Result<Record, Str
         || user_script(seed),
     );
     // A failed final checkpoint can leave `record` marked done in memory; publish only on success.
-    result?;
+    let after = result?;
     if let Some(agent) = agent {
         *agent.provision.lock().unwrap_or_else(|p| p.into_inner()) = record.report();
     }
-    Ok(record)
+    Ok((record, after))
 }
 pub fn specialize() -> Result<(), String> {
     let seed = discover()?.ok_or_else(|| "Windows provision seed not found".to_string())?;
-    let record = apply(&seed, Phase::Specialize, None)?;
+    let (record, _) = apply(&seed, Phase::Specialize, None)?;
     if record.state == State::Failed {
         return Err("specialize provisioning failed; inspect persisted errors".into());
     }
@@ -328,7 +328,11 @@ pub fn serve(agent: Arc<Agent>) {
                     }
                 }
                 match apply(&seed, Phase::Service, Some(&agent)) {
-                    Ok(record) if record.state == State::Pending => {}
+                    Ok((_, After::Restart)) => {
+                        restart_for_hostname();
+                        return;
+                    }
+                    Ok((record, _)) if record.state == State::Pending => {}
                     Ok(_) => return,
                     Err(e) => {
                         let mut report = seed.config_report();
@@ -349,6 +353,35 @@ pub fn serve(agent: Arc<Agent>) {
             }
         }
         std::thread::sleep(Duration::from_millis(500));
+    }
+}
+/// The requested computer name is set but not active. Restart once Windows
+/// setup after sysprep has finished: a restart during OOBE would break it.
+/// When the setup state cannot be read, do not restart; provisioning then
+/// waits for the next boot, as it would without this restart.
+fn restart_for_hostname() {
+    crate::info!("restarting Windows once to make the requested computer name active");
+    loop {
+        if super::service::stopping() {
+            crate::warning!(
+                "the agent is stopping; Windows was not restarted for the computer name"
+            );
+            return;
+        }
+        match api::setup_in_progress() {
+            Ok(false) => break,
+            Ok(true) => std::thread::sleep(Duration::from_secs(5)),
+            Err(e) => {
+                crate::error!("cannot read the Windows setup state ({e}); Windows was not restarted for the computer name");
+                return;
+            }
+        }
+    }
+    if let Err(e) = api::shutdown(
+        true,
+        Some("Virtainer Guest Agent: restarting to make the requested computer name active"),
+    ) {
+        crate::error!("cannot restart Windows for the computer name: {e}");
     }
 }
 impl Seed {

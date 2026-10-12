@@ -101,7 +101,8 @@ fn run(ctx: &mut Ctx<'_>, name: &str, mut args: Args) -> Reply {
             let mode = args.opt_str("mode")?.unwrap_or_else(|| "powerdown".into());
             args.finish()?;
             crate::qmp::enum_value(&mode, "mode", &["powerdown", "halt", "reboot"])?;
-            api::shutdown(mode == "reboot").map_err(|e| QgaError::os("failed to shutdown", &e))?;
+            api::shutdown(mode == "reboot", None)
+                .map_err(|e| QgaError::os("failed to shutdown", &e))?;
             Ok(json!({}))
         }
         "guest-set-user-password" => {

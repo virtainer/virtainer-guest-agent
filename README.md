@@ -167,7 +167,14 @@ runs this entry. An ordinary service boot leaves a new instance `pending` until
 its specialize checkpoint exists and the active Windows hostname matches the
 requested name (case-insensitive). A service restart before the specialize reboot
 keeps provisioning `pending` and defers networking, accounts and the user script. It does not
-report `done` for a rename that still needs a reboot. The service is not running
+report `done` for a rename that still needs a reboot. When the service finds
+the requested name set but not yet active after specialize (Windows Server 2019),
+it restarts Windows itself, once per provisioning: it records the restart first,
+waits until Windows setup after sysprep (`HKLM\SYSTEM\Setup`
+`SystemSetupInProgress`/`OOBEInProgress`) has finished, logs the reason, and
+restarts with a comment that Windows records in the System log (event 1074).
+If the name is still not active after that restart, provisioning stays `pending`
+until the next boot. The service is not running
 during specialize, so the agent first answers on vsock after that reboot. Non-generalized images require the operator to arrange
 this entry point and the appropriate reboot before using the service.
 

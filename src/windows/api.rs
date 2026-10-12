@@ -88,6 +88,15 @@ unsafe extern "system" {
         reboot: i32,
         reason: u32,
     ) -> i32;
+    fn RegGetValueW(
+        key: Handle,
+        subkey: *const u16,
+        value: *const u16,
+        flags: u32,
+        kind: *mut u32,
+        data: *mut c_void,
+        size: *mut u32,
+    ) -> i32;
 }
 #[link(name = "netapi32")]
 unsafe extern "system" {
@@ -157,7 +166,10 @@ pub fn set_time(ns: i64) -> io::Result<()> {
         ok(SetSystemTime(&st))
     }
 }
-pub fn shutdown(reboot: bool) -> io::Result<()> {
+/// `message` is the comment Windows records with the shutdown (System log,
+/// event 1074).
+pub fn shutdown(reboot: bool, message: Option<&str>) -> io::Result<()> {
+    let mut message = message.map(wide);
     let mut token = std::ptr::null_mut();
     // SAFETY: current process pseudo-handle, writable token out-parameter.
     unsafe {
@@ -191,7 +203,9 @@ pub fn shutdown(reboot: bool) -> io::Result<()> {
             }
             ok(InitiateSystemShutdownExW(
                 std::ptr::null_mut(),
-                std::ptr::null_mut(),
+                message
+                    .as_mut()
+                    .map_or(std::ptr::null_mut(), |m| m.as_mut_ptr()),
                 0,
                 0,
                 i32::from(reboot),
@@ -204,6 +218,34 @@ pub fn shutdown(reboot: bool) -> io::Result<()> {
         CloseHandle(token);
     }
     result
+}
+/// Windows setup (specialize or OOBE after sysprep) is still running:
+/// `HKLM\SYSTEM\Setup` `SystemSetupInProgress` or `OOBEInProgress` is set.
+pub fn setup_in_progress() -> io::Result<bool> {
+    // HKEY_LOCAL_MACHINE is the sign-extended 32-bit value.
+    let machine = 0x8000_0002_u32 as i32 as isize as Handle;
+    for value in ["SystemSetupInProgress", "OOBEInProgress"] {
+        let mut data = 0u32;
+        let mut size = 4u32;
+        // SAFETY: terminated key and value names; a DWORD out-buffer of `size` bytes.
+        let status = unsafe {
+            RegGetValueW(
+                machine,
+                wide(r"SYSTEM\Setup").as_ptr(),
+                wide(value).as_ptr(),
+                0x10,
+                std::ptr::null_mut(),
+                (&mut data as *mut u32).cast(),
+                &mut size,
+            )
+        };
+        match status {
+            0 if data != 0 => return Ok(true),
+            0 | 2 => {}
+            error => return Err(io::Error::from_raw_os_error(error)),
+        }
+    }
+    Ok(false)
 }
 pub fn set_password(user: &str, password: &str) -> io::Result<()> {
     if user.is_empty() || user.contains('\0') || password.contains('\0') {
