@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.2
 
 - Windows: network provisioning no longer fails with `Set-NetIPInterface ...
   found no matching object` when an adapter's IPv4 or IPv6 interface does
