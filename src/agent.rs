@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use crate::commands::{exec::ExecTable, file::FileTable, fsfreeze::Freezer};
 use crate::config::Config;
-use crate::shell::Sessions;
+use crate::shell_protocol::Sessions;
 
 pub struct Agent {
     pub config: Config,

@@ -26,6 +26,7 @@ mod server;
 mod session;
 #[cfg(target_os = "linux")]
 mod shell;
+mod shell_protocol;
 #[cfg(target_os = "linux")]
 mod sys;
 #[cfg(target_os = "linux")]
