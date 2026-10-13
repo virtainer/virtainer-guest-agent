@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Windows: `guest-network-get-interfaces` now uses the native IP Helper API
+  instead of PowerShell and per-adapter CIM queries, removing that source of
+  slow host polls and abandoned PowerShell processes. Hidden adapters, friendly
+  names, MAC addresses, IPv4/IPv6 prefixes and IPv6 link-local scope IDs are
+  retained; software loopback is excluded as before.
+
 ## 0.3.2
 
 - Windows: network provisioning no longer fails with `Set-NetIPInterface ...
