@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The Virtainer authors
 # Regenerate LICENSES/THIRD-PARTY-RUST.txt: the licence texts and copyright
-# lines of every crate in Cargo.lock for the musl target.
+# lines of every crate in Cargo.lock for the musl and Windows targets.
 #   tools/third-party-licenses.sh           rewrite the file
 #   tools/third-party-licenses.sh --check   fail if it is out of date
 # Needs cargo-about 0.9.2:

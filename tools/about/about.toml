@@ -1,7 +1,23 @@
 # MIT is listed before Apache-2.0 so that a dual-licensed crate is attributed
 # under MIT, whose licence file carries the crate's own copyright line.
 accepted = ["MIT", "Unlicense", "Apache-2.0", "Unicode-3.0"]
-targets = ["x86_64-unknown-linux-musl"]
+targets = ["x86_64-unknown-linux-musl", "x86_64-pc-windows-gnu"]
 ignore-dev-dependencies = true
 ignore-build-dependencies = true
 private = { ignore = true }
+
+# windows-rs indents its licence file, which the licence scanner does not
+# recognise; point it at the file so the Microsoft copyright line is kept.
+[windows-sys.clarify]
+license = "MIT OR Apache-2.0"
+[[windows-sys.clarify.files]]
+path = "license-mit"
+license = "MIT"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-link.clarify]
+license = "MIT OR Apache-2.0"
+[[windows-link.clarify.files]]
+path = "license-mit"
+license = "MIT"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
