@@ -13,6 +13,7 @@
 
 use std::io::{self, Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::json;
@@ -68,6 +69,8 @@ enum End {
     Exited(u32),
     Protocol(String),
     Failed(io::Error),
+    /// Sending output failed; `forward` holds the error.
+    OutputFailed,
 }
 
 /// Relay until the shell exits or the host leaves; returns how it ended.
@@ -78,10 +81,12 @@ where
     O: Read + Send,
     P: Console,
 {
+    let output_failed = AtomicBool::new(false);
     std::thread::scope(|scope| {
-        let forward = scope.spawn(move || forward(conn, output));
+        let failed = &output_failed;
+        let forward = scope.spawn(move || forward(conn, output, failed));
         let end = match conn.keep_open() {
-            Ok(()) => pump(conn, input, console),
+            Ok(()) => pump(conn, input, console, &output_failed),
             Err(e) => End::Failed(e),
         };
         console.close();
@@ -90,9 +95,10 @@ where
         match (end, forwarded) {
             (End::HostClosed, _) => "the host closed the connection".into(),
             (End::Protocol(why), _) => format!("protocol error: {why}"),
-            (End::Failed(e), _) | (End::Exited(_), Err(e)) => {
+            (End::Failed(e), _) | (End::Exited(_) | End::OutputFailed, Err(e)) => {
                 format!("the connection failed: {e}")
             }
+            (End::OutputFailed, Ok(())) => "the connection failed".into(),
             (End::Exited(code), Ok(())) => {
                 // Signed, as guest-exec-status reports a Windows exit code.
                 let control = json!({ "exitcode": code as i32 }).to_string();
@@ -105,8 +111,14 @@ where
     })
 }
 
-/// Host input to the console until the shell exits or the host leaves.
-fn pump<C: Connection, I: Write, P: Console>(conn: &C, mut input: I, console: &P) -> End {
+/// Host input to the console until the shell exits, the host leaves or
+/// output can no longer be sent.
+fn pump<C: Connection, I: Write, P: Console>(
+    conn: &C,
+    mut input: I,
+    console: &P,
+    output_failed: &AtomicBool,
+) -> End {
     let mut frames = Frames::default();
     let mut buf = vec![0u8; CHUNK];
     // Once the console takes no more keystrokes, they are dropped; the host
@@ -115,6 +127,9 @@ fn pump<C: Connection, I: Write, P: Console>(conn: &C, mut input: I, console: &P
     loop {
         if let Some(code) = console.exit_code() {
             return End::Exited(code);
+        }
+        if output_failed.load(Ordering::SeqCst) {
+            return End::OutputFailed;
         }
         match conn.readable(EXIT_POLL) {
             Ok(true) => {}
@@ -148,10 +163,10 @@ fn pump<C: Connection, I: Write, P: Console>(conn: &C, mut input: I, console: &P
     }
 }
 
-/// Console output to the host until the console closes. Output is read to
-/// the end even after the connection fails: closing a pseudo console can
-/// wait until its output has been read.
-fn forward<C: Connection, O: Read>(conn: &C, mut output: O) -> io::Result<()> {
+/// Console output to the host until the console closes. A failed send is
+/// flagged so that the pump ends the session; output is still read to the
+/// end, since closing a pseudo console can wait until it has been read.
+fn forward<C: Connection, O: Read>(conn: &C, mut output: O, failed: &AtomicBool) -> io::Result<()> {
     let mut buf = vec![0u8; CHUNK];
     let mut result = Ok(());
     loop {
@@ -160,6 +175,9 @@ fn forward<C: Connection, O: Read>(conn: &C, mut output: O) -> io::Result<()> {
             Ok(n) => {
                 if result.is_ok() {
                     result = conn.send_all(&frame(DATA, &buf[..n]));
+                    if result.is_err() {
+                        failed.store(true, Ordering::SeqCst);
+                    }
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
@@ -335,6 +353,47 @@ mod tests {
             });
             let (how, (out, controls)) = how;
             (how, fake, out, controls)
+        }
+
+        /// A host that stays connected but stopped reading: every send
+        /// times out.
+        struct StalledHost(UnixStream);
+
+        impl Connection for StalledHost {
+            fn keep_open(&self) -> io::Result<()> {
+                Ok(())
+            }
+
+            fn readable(&self, timeout: Duration) -> io::Result<bool> {
+                self.0.readable(timeout)
+            }
+
+            fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+                self.0.recv(buf)
+            }
+
+            fn send_all(&self, _: &[u8]) -> io::Result<()> {
+                Err(io::ErrorKind::TimedOut.into())
+            }
+        }
+
+        #[test]
+        fn a_failed_send_ends_the_session() {
+            let (host, guest) = UnixStream::pair().unwrap();
+            let guest = StalledHost(guest);
+            let (mut fake, input, output) = console();
+            (&host).write_all(&frame(DATA, b"echo hi\r")).unwrap();
+            let (done, ended) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let how = relay(&guest, input, output, &mut fake);
+                let _ = done.send((how, fake.closed));
+            });
+            let (how, closed) = ended
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the session outlived its connection");
+            assert_eq!(how, "the connection failed: timed out");
+            assert!(closed);
+            drop(host);
         }
 
         #[test]
