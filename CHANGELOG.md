@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 - Windows: `__io.virtainer_shell` is supported. It runs Windows PowerShell
   as SYSTEM on a pseudo console (ConPTY), with the same frames, resize and
