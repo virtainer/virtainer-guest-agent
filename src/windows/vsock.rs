@@ -100,7 +100,7 @@ impl Socket {
     }
 }
 impl Socket {
-    /// Wait until a connection or data is pending, or the timeout passes. viosock sockets
+    /// Wait until a connection is pending, or the timeout passes. viosock sockets
     /// must stay in their default blocking mode: any FIONBIO call, including
     /// clearing it, leaves the socket non-blocking, so readiness is polled
     /// with select instead.
@@ -188,15 +188,14 @@ impl Write for Socket {
 /// A Shell session reads on the connection's thread and writes on its own:
 /// Winsock allows one of each at a time on a socket.
 impl Connection for Socket {
-    fn keep_open(&self) -> io::Result<()> {
-        // SAFETY: SO_RCVTIMEO takes a DWORD; zero waits without limit.
-        if unsafe { setsockopt(self.0, 0xffff, 0x1006, &0, 4) } != 0 {
+    fn set_recv_timeout(&self, timeout: Duration) -> io::Result<()> {
+        // At least a millisecond: zero would wait without limit.
+        let millis = timeout.as_millis().clamp(1, u128::from(u32::MAX)) as u32;
+        // SAFETY: SO_RCVTIMEO takes a DWORD; it lives through the call.
+        if unsafe { setsockopt(self.0, 0xffff, 0x1006, &millis, 4) } != 0 {
             return Err(error());
         }
         Ok(())
-    }
-    fn readable(&self, timeout: Duration) -> io::Result<bool> {
-        Socket::readable(self, timeout)
     }
     fn recv(&self, b: &mut [u8]) -> io::Result<usize> {
         Socket::recv(self, b)

@@ -6,13 +6,14 @@
 //!
 //! viosock sockets cannot be made non-blocking, and neither can the console's
 //! pipes, so the relay uses threads instead of one poll loop. The
-//! connection's own thread waits for host input with select, queues
-//! keystrokes and applies resizes, and between reads looks for the shell's
-//! exit and for a failed send. It never waits on the console. One thread
-//! writes the queued keystrokes to the console, another copies the console's
-//! output into data frames. When the session ends, the console is closed,
-//! which ends its output and fails a write still waiting on it; the exit
-//! frame follows the last output.
+//! connection's own thread waits for host input in recv with a short
+//! timeout, queues keystrokes and applies resizes, and between reads looks
+//! for the shell's exit and for a failed send. It never waits on the
+//! console. (select would not do: on a viosock socket it never reports the
+//! host leaving, while recv does.) One thread writes the queued keystrokes
+//! to the console, another copies the console's output into data frames.
+//! When the session ends, the console is closed, which ends its output and
+//! fails a write still waiting on it; the exit frame follows the last output.
 
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -27,7 +28,7 @@ use crate::shell_protocol::{frame, resize, Frame, Frames, CHUNK, CONTROL, DATA};
 
 /// The only account a Windows Shell runs as: the service's own, LocalSystem.
 pub const USER: &str = "SYSTEM";
-/// How long to wait for host input before looking for the shell's exit.
+/// How long recv waits for host input before looking for the shell's exit.
 const EXIT_POLL: Duration = Duration::from_millis(200);
 /// Keystrokes queued but not yet taken by the console. Past this the console
 /// is taking no input, and further keystrokes are dropped.
@@ -53,10 +54,10 @@ pub fn command_line(system_dir: &Path) -> String {
 
 /// A session's connection, shared by the relay's two threads.
 pub trait Connection: Sync {
-    /// Lift the idle timeout: a Shell may sit idle as long as its user likes.
-    fn keep_open(&self) -> io::Result<()>;
-    /// Whether input is waiting, after at most `timeout`.
-    fn readable(&self, timeout: Duration) -> io::Result<bool>;
+    /// Make `recv` give up after `timeout` without input, with `TimedOut`
+    /// or `WouldBlock`. This replaces the idle timeout: a Shell may sit idle
+    /// as long as its user likes.
+    fn set_recv_timeout(&self, timeout: Duration) -> io::Result<()>;
     fn recv(&self, buf: &mut [u8]) -> io::Result<usize>;
     fn send_all(&self, data: &[u8]) -> io::Result<()>;
 }
@@ -92,7 +93,10 @@ where
     std::thread::scope(|scope| {
         let failed = &output_failed;
         let forward = scope.spawn(move || forward(conn, output, failed));
-        let end = match conn.keep_open().and_then(|()| Keystrokes::start(input)) {
+        let end = match conn
+            .set_recv_timeout(EXIT_POLL)
+            .and_then(|()| Keystrokes::start(input))
+        {
             Ok(keystrokes) => pump(conn, keystrokes, console, &output_failed),
             Err(e) => End::Failed(e),
         };
@@ -135,15 +139,19 @@ fn pump<C: Connection, P: Console>(
         if output_failed.load(Ordering::SeqCst) {
             return End::OutputFailed;
         }
-        match conn.readable(EXIT_POLL) {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(e) => return End::Failed(e),
-        }
         let n = match conn.recv(&mut buf) {
             Ok(0) => return End::HostClosed,
             Ok(n) => n,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::TimedOut
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue
+            }
             Err(e) => return End::Failed(e),
         };
         frames.push(&buf[..n]);
@@ -258,27 +266,13 @@ mod tests {
         use super::*;
         use serde_json::Value;
         use std::io::{BufRead, PipeReader, PipeWriter};
-        use std::os::fd::AsRawFd;
         use std::os::unix::net::UnixStream;
         use std::sync::atomic::{AtomicU32, Ordering};
         use std::sync::{Arc, Mutex};
 
         impl Connection for UnixStream {
-            fn keep_open(&self) -> io::Result<()> {
-                Ok(())
-            }
-
-            fn readable(&self, timeout: Duration) -> io::Result<bool> {
-                let mut fd = libc::pollfd {
-                    fd: self.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                };
-                // SAFETY: one valid pollfd.
-                match unsafe { libc::poll(&mut fd, 1, timeout.as_millis() as i32) } {
-                    n if n < 0 => Err(io::Error::last_os_error()),
-                    n => Ok(n > 0),
-                }
+            fn set_recv_timeout(&self, timeout: Duration) -> io::Result<()> {
+                self.set_read_timeout(Some(timeout))
             }
 
             fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
@@ -402,12 +396,8 @@ mod tests {
         struct StalledHost(UnixStream);
 
         impl Connection for StalledHost {
-            fn keep_open(&self) -> io::Result<()> {
-                Ok(())
-            }
-
-            fn readable(&self, timeout: Duration) -> io::Result<bool> {
-                self.0.readable(timeout)
+            fn set_recv_timeout(&self, timeout: Duration) -> io::Result<()> {
+                self.0.set_recv_timeout(timeout)
             }
 
             fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
