@@ -13,6 +13,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use crate::windows_support::shell::Connection;
 use crate::windows_support::transport::{host_peer, Address, AF_VSOCK};
 #[link(name = "ws2_32")]
 unsafe extern "system" {
@@ -99,7 +100,7 @@ impl Socket {
     }
 }
 impl Socket {
-    /// Wait until a connection is pending or the timeout passes. viosock sockets
+    /// Wait until a connection or data is pending, or the timeout passes. viosock sockets
     /// must stay in their default blocking mode: any FIONBIO call, including
     /// clearing it, leaves the socket non-blocking, so readiness is polled
     /// with select instead.
@@ -139,8 +140,8 @@ impl Drop for Socket {
         }
     }
 }
-impl Read for Socket {
-    fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+impl Socket {
+    fn recv(&self, b: &mut [u8]) -> io::Result<usize> {
         if b.is_empty() {
             return Ok(0);
         }
@@ -160,8 +161,13 @@ impl Read for Socket {
         }
     }
 }
-impl Write for Socket {
-    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+impl Read for Socket {
+    fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+        self.recv(b)
+    }
+}
+impl Socket {
+    fn send(&self, b: &[u8]) -> io::Result<usize> {
         // SAFETY: b describes a readable buffer of the bounded length.
         let n = unsafe { send(self.0, b.as_ptr(), b.len().min(i32::MAX as usize) as i32, 0) };
         if n < 0 {
@@ -170,7 +176,40 @@ impl Write for Socket {
             Ok(n as usize)
         }
     }
+}
+impl Write for Socket {
+    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        self.send(b)
+    }
     fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+/// A Shell session reads on the connection's thread and writes on its own:
+/// Winsock allows one of each at a time on a socket.
+impl Connection for Socket {
+    fn keep_open(&self) -> io::Result<()> {
+        // SAFETY: SO_RCVTIMEO takes a DWORD; zero waits without limit.
+        if unsafe { setsockopt(self.0, 0xffff, 0x1006, &0, 4) } != 0 {
+            return Err(error());
+        }
+        Ok(())
+    }
+    fn readable(&self, timeout: Duration) -> io::Result<bool> {
+        Socket::readable(self, timeout)
+    }
+    fn recv(&self, b: &mut [u8]) -> io::Result<usize> {
+        Socket::recv(self, b)
+    }
+    fn send_all(&self, mut b: &[u8]) -> io::Result<()> {
+        while !b.is_empty() {
+            match self.send(b) {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Ok(n) => b = &b[n..],
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
         Ok(())
     }
 }

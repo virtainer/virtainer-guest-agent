@@ -47,8 +47,9 @@ Cloud Hypervisor's virtio-console has no named virtio-serial ports.
 Beyond qemu-ga:
 
 - **Shell:** `__io.virtainer_shell` turns the connection into an
-  interactive terminal: the chosen user's login shell on a pseudo-terminal,
-  live resize, up to 8 sessions at once, apart from the 16 QGA connections.
+  interactive terminal: the chosen user's login shell on a pseudo-terminal
+  (on Windows, PowerShell as SYSTEM on a pseudo console), live resize, up
+  to 8 sessions at once, apart from the 16 QGA connections.
   Closing the connection hangs the shell up, like closing an SSH session.
   The protocol is under [Shell protocol](#shell-protocol).
   Guest owners who don't want it add the command to `block-rpcs`; blocking
@@ -101,6 +102,7 @@ provisioning and executable replacement must also be exercised in a real guest.
 | Files | `guest-file-open`, `guest-file-read`, `guest-file-write`, `guest-file-seek`, `guest-file-flush`, `guest-file-close` |
 | Accounts | `guest-set-user-password` (base64 UTF-8 password, `crypted: false`) |
 | Provisioning | `__io.virtainer_provision` |
+| Shell | `__io.virtainer_shell` (Windows PowerShell as SYSTEM; see [Shell on Windows](#shell-on-windows)) |
 
 `guest-set-time` requires an explicit Unix time in nanoseconds on Windows; this
 build does not read an RTC. `guest-shutdown` accepts `powerdown`, `halt` and
@@ -112,10 +114,9 @@ The known commands outside this table return the QAPI error
 `{"error": {"class": "GenericError", "desc": "Command <name> is not supported"}}`.
 This includes filesystem freeze/thaw and trim, filesystem/disk/device inventory,
 vCPU and memory commands, statistics, routes, timezone/user inventory, authorized
-key RPCs, suspend commands and `__io.virtainer_shell`. They are absent from
-`guest-info`'s supported command list. Unknown command names return
-`CommandNotFound`. VSS and ConPTY are outside this MVP; Windows snapshots are
-crash-consistent.
+key RPCs and suspend commands. They are absent from `guest-info`'s supported
+command list. Unknown command names return `CommandNotFound`. VSS is outside
+this MVP; Windows snapshots are crash-consistent.
 
 ### Windows installation and specialize
 
@@ -331,7 +332,7 @@ about every guest or hypervisor version.
 | Open `guest-file-open` handles | 256 |
 | `guest-file-read` count | 48 MiB |
 | Maximum size of one QGA message | 1 MiB; 64 MiB for `guest-file-write` |
-| Idle connection timeout | 600 s |
+| Idle connection timeout | 600 s; none once the connection is a Shell session |
 | Write timeout (a host that stops reading) | 60 s |
 | Shell frame, data, host to guest | 64 KiB |
 | Shell frame, data, guest to host | chunks of up to 16 KiB |
@@ -372,6 +373,27 @@ the home directory with a fresh environment. It is not a PAM login: no
 password, no logind session, no utmp entry. Closing the connection hangs the
 shell up, like closing an SSH session. At most 8 sessions run at once, apart
 from the 16 QGA connections, and every session is logged.
+
+### Shell on Windows
+
+The protocol is the same. `user` must be `SYSTEM`: the shell is Windows
+PowerShell 5.1 (`powershell.exe -NoLogo`) running as the service's own
+account, LocalSystem, so `whoami` prints `nt authority\system`. It runs in
+session 0 with no desktop (windows a program opens are not visible), starts
+in SYSTEM's profile directory and inherits the service's environment; `term`
+is checked but not used. Type `cmd` for the Command Prompt.
+
+The terminal is a pseudo console (ConPTY), which Windows Server 2019 and
+later provide. Keystrokes are read as UTF-8 and output is UTF-8 VT text,
+so `dir` and other console programs show non-ASCII names correctly whatever
+the console code page. A program that writes UTF-8 bytes to its output on
+its own (Python, Git) is decoded with the console code page, as in a local
+console; `chcp 65001` or `[Console]::OutputEncoding = [Text.Encoding]::UTF8`
+fixes that for the session. Ctrl-C reaches the foreground program as it
+does in a local console. The shell runs in a job object: when the session
+ends, because the shell exited or the connection closed, every process it
+started ends with it. The exit code is reported as `guest-exec-status`
+reports it on Windows, a signed 32-bit value.
 
 ## Build
 

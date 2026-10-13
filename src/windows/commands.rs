@@ -8,7 +8,7 @@ pub mod exec;
 #[path = "../commands/file.rs"]
 pub mod file;
 
-use crate::windows::{api, queries};
+use crate::windows::{api, queries, shell};
 use crate::windows_support::table;
 use crate::{
     agent::Agent,
@@ -19,12 +19,16 @@ use serde_json::{json, Value};
 pub struct Ctx<'a> {
     pub agent: &'a Agent,
     pub delimit_next: bool,
+    /// Set by `__io.virtainer_shell`: after the reply, this connection
+    /// carries the session instead of QGA messages.
+    pub upgrade: Option<shell::Session<'a>>,
 }
 impl<'a> Ctx<'a> {
     pub fn new(agent: &'a Agent) -> Self {
         Self {
             agent,
             delimit_next: false,
+            upgrade: None,
         }
     }
 }
@@ -89,6 +93,7 @@ fn run(ctx: &mut Ctx<'_>, name: &str, mut args: Args) -> Reply {
         "guest-file-flush" => file::flush(ctx, args),
         "guest-exec" => exec::exec(ctx, args),
         "guest-exec-status" => exec::exec_status(ctx, args),
+        crate::shell_protocol::NAME => shell::open(ctx, args),
         "guest-set-time" => {
             let time = args.opt_int("time")?;
             args.finish()?;

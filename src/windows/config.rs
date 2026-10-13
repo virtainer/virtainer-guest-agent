@@ -39,10 +39,13 @@ impl Config {
         }
         Ok(c)
     }
+    /// The Shell runs commands just as `guest-exec` does, so a guest that
+    /// turns `guest-exec` off turns the Shell off too.
     pub fn enabled(&self, name: &str) -> bool {
         self.allow_rpcs
             .as_ref()
             .is_none_or(|list| list.iter().any(|s| s == name))
             && !self.block_rpcs.iter().any(|s| s == name)
+            && (name != crate::shell_protocol::NAME || self.enabled("guest-exec"))
     }
 }

@@ -17,9 +17,9 @@ pub trait Stream: Read + Write + AsRawFd {}
 #[cfg(target_os = "linux")]
 impl<T: Read + Write + AsRawFd> Stream for T {}
 #[cfg(target_os = "windows")]
-pub trait Stream: Read + Write {}
+pub trait Stream: Read + Write + crate::windows_support::shell::Connection {}
 #[cfg(target_os = "windows")]
-impl<T: Read + Write> Stream for T {}
+impl<T: Read + Write + crate::windows_support::shell::Connection> Stream for T {}
 
 use serde_json::Value;
 
@@ -33,10 +33,7 @@ use crate::qmp::QgaError;
 /// connection's place among the QGA connections; it is given up when the
 /// connection becomes a Shell session.
 pub fn serve<S: Stream, G>(agent: &Agent, mut stream: S, slot: G) -> io::Result<()> {
-    #[cfg(target_os = "linux")]
     let mut slot = Some(slot);
-    #[cfg(target_os = "windows")]
-    let _slot = slot;
     let mut framer = Framer::default();
     let mut ctx = Ctx::new(agent);
     let mut buf = vec![0u8; 64 * 1024];
@@ -65,10 +62,12 @@ pub fn serve<S: Stream, G>(agent: &Agent, mut stream: S, slot: G) -> io::Result<
                     if let Some(reply) = reply {
                         send(&mut stream, &mut ctx, &reply)?;
                     }
-                    #[cfg(target_os = "linux")]
                     if let Some(session) = ctx.upgrade.take() {
                         drop(slot.take());
+                        #[cfg(target_os = "linux")]
                         crate::shell::relay(session, &mut stream);
+                        #[cfg(target_os = "windows")]
+                        crate::windows::shell::relay(session, &stream);
                         return Ok(());
                     }
                 }

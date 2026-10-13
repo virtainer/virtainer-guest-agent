@@ -24,6 +24,7 @@ pub const SUPPORTED: &[&str] = &[
     "guest-file-flush",
     "guest-set-user-password",
     "__io.virtainer_provision",
+    "__io.virtainer_shell",
 ];
 pub const UNSUPPORTED: &[&str] = &[
     "guest-fsfreeze-status",
@@ -51,7 +52,6 @@ pub const UNSUPPORTED: &[&str] = &[
     "guest-suspend-ram",
     "guest-suspend-hybrid",
     "guest-get-devices",
-    "__io.virtainer_shell",
 ];
 pub fn unsupported(name: &str) -> crate::qmp::QgaError {
     crate::qmp::QgaError::generic(format!("Command {name} is not supported"))
@@ -68,7 +68,7 @@ mod tests {
         assert!(SUPPORTED.contains(&"__io.virtainer_provision"));
         assert!(SUPPORTED.contains(&"guest-shutdown"));
         assert!(UNSUPPORTED.contains(&"guest-fsfreeze-freeze"));
-        assert!(UNSUPPORTED.contains(&"__io.virtainer_shell"));
+        assert!(SUPPORTED.contains(&"__io.virtainer_shell"));
         assert_eq!(
             unsupported("guest-fstrim").to_json(),
             serde_json::json!({"class":"GenericError","desc":"Command guest-fstrim is not supported"})

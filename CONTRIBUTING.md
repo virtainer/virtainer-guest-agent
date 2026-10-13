@@ -24,8 +24,9 @@ suite is for throwaway test VMs only.
 The platform-independent FAT12 reader, provision schema and state machine,
 hostname completion gate, DHCP selection plan, service startup/rollback decisions,
 update suppression checkpoints, installed-version updater staging, preservation
-of the installed executable during backup, deferred removal decisions and Windows command
-table run in the normal Linux test suite. Windows API calls
+of the installed executable during backup, deferred removal decisions, Windows command
+table, and the Windows Shell's user check, command line and relay (against a
+fake console) run in the normal Linux test suite. Windows API calls
 are isolated under `src/windows/`; the Linux runtime remains behind its own
 `target_os = "linux"` modules. Do not add dependencies for Windows seed parsing.
 
@@ -52,6 +53,16 @@ exits during initialization, repeated boots with the failed seed still attached,
 a reboot between the backup copy and atomic replacement,
 a MAC-selected DHCP reset of an adapter with stale static IPv6 addressing, and
 uninstall from the installed executable followed by its deferred removal reboot.
+
+The Shell needs its own checks on a real guest, on an English and on a
+non-English (for example zh-CN) installation: non-ASCII text echoed and
+listed by `dir` arrives intact; a resize shows in
+`$Host.UI.RawUI.WindowSize`; Ctrl-C stops `ping -t`; `exit 3` reports
+exit code 3; closing the connection, and stopping the service, leave no
+shell or child process behind (`ping -t` started from `cmd` inside the
+shell is a good probe); a ninth session is refused; a session idle for 15
+minutes still works; blocking `guest-exec` takes the Shell out of
+`guest-info`'s enabled commands.
 
 ## Third-party code and licences
 

@@ -14,6 +14,8 @@ pub mod fat12;
 pub mod helper;
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub mod provision;
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub mod shell;
 pub mod table;
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]

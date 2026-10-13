@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Windows: `__io.virtainer_shell` is supported. It runs Windows PowerShell
+  as SYSTEM on a pseudo console (ConPTY), with the same frames, resize and
+  exit report as on Linux; the only `user` accepted is `SYSTEM`. Ctrl-C
+  reaches the foreground program, output is UTF-8, and ending the session
+  ends every process the shell started. As on Linux, at most 8 sessions run
+  at once, apart from the 16 QGA connections, a session has no idle timeout,
+  and blocking `guest-exec` blocks the Shell too.
+
 ## 0.3.3
 
 - Windows: `guest-network-get-interfaces` now uses the native IP Helper API

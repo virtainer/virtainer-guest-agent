@@ -7,6 +7,7 @@ pub mod api;
 mod provision;
 pub mod queries;
 pub mod service;
+pub mod shell;
 mod update;
 mod vsock;
 use std::path::PathBuf;
