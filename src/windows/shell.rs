@@ -34,7 +34,7 @@ use windows_sys::Win32::{
             InitializeProcThreadAttributeList, ResumeThread, TerminateProcess,
             UpdateProcThreadAttribute, WaitForSingleObject, CREATE_SUSPENDED,
             EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
-            PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+            PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW,
         },
     },
 };
@@ -197,7 +197,7 @@ fn kill_on_close_job() -> io::Result<OwnedHandle> {
 struct Attributes(Vec<usize>);
 
 impl Attributes {
-    fn pseudo_console(console: &HPCON) -> io::Result<Self> {
+    fn pseudo_console(console: HPCON) -> io::Result<Self> {
         let mut size = 0;
         // SAFETY: a size query; it fails with ERROR_INSUFFICIENT_BUFFER by design.
         unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &mut size) };
@@ -207,14 +207,14 @@ impl Attributes {
             list.0.clear();
             return Err(io::Error::last_os_error());
         }
-        // SAFETY: an initialized list; `console` outlives the list's use in
-        // CreateProcessW, which copies what it needs.
+        // SAFETY: an initialized list. Unlike most attributes, this one
+        // takes the value itself, the HPCON, in place of a pointer to it.
         let updated = unsafe {
             UpdateProcThreadAttribute(
                 list.raw(),
                 0,
                 PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
-                (console as *const HPCON).cast(),
+                console as *const std::ffi::c_void,
                 size_of::<HPCON>(),
                 ptr::null_mut(),
                 ptr::null(),
@@ -274,13 +274,10 @@ fn start(slot: Slot<'_>, rows: u16, cols: u16) -> Result<Session<'_>, QgaError> 
             "Failed to execute child process \u{201c}{command_line}\u{201d} ({e})"
         ))
     };
-    let mut attributes = Attributes::pseudo_console(&hpc).map_err(start_error)?;
+    let mut attributes = Attributes::pseudo_console(hpc).map_err(start_error)?;
     // SAFETY: zero is a valid value of this plain C structure.
     let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
-    // Null standard handles: the child takes the pseudo console's, not
-    // whatever the service's own standard handles are.
-    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     startup.lpAttributeList = attributes.raw();
     let mut line = wide(&command_line);
     let home = home();
