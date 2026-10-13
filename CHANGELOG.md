@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.3
 
 - Windows: `guest-network-get-interfaces` now uses the native IP Helper API
   instead of PowerShell and per-adapter CIM queries, removing that source of
