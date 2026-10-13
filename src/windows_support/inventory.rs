@@ -88,8 +88,13 @@ mod tests {
 
     #[test]
     fn interface_shape_omits_empty_optional_members() {
-        let name: Vec<_> = "以太网 🖧".encode_utf16().collect();
-        assert_eq!(interface(&name, &[], vec![]), json!({"name": "以太网 🖧"}));
+        let name: Vec<_> = "\u{4ee5}\u{592a}\u{7f51} \u{1f5a7}"
+            .encode_utf16()
+            .collect();
+        assert_eq!(
+            interface(&name, &[], vec![]),
+            json!({"name": "\u{4ee5}\u{592a}\u{7f51} \u{1f5a7}"})
+        );
         let ip = ip_address("192.0.2.5".parse().unwrap(), 0, 24);
         assert_eq!(
             json!([interface(
@@ -98,7 +103,7 @@ mod tests {
                 vec![ip]
             )]),
             json!([{
-                "name": "以太网 🖧",
+                "name": "\u{4ee5}\u{592a}\u{7f51} \u{1f5a7}",
                 "hardware-address": "52:54:00:ab:cd:ef",
                 "ip-addresses": [{
                     "ip-address": "192.0.2.5", "ip-address-type": "ipv4", "prefix": 24
