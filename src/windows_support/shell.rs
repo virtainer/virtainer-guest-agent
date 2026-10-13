@@ -4,16 +4,20 @@
 //! The Windows Shell apart from ConPTY itself: who may ask for it, what it
 //! runs, and the relay between the connection and the pseudo console.
 //!
-//! viosock sockets cannot be made non-blocking, so the relay uses two threads
-//! instead of one poll loop. The connection's own thread waits for host input
-//! with select, writes keystrokes to the console and applies resizes, and
-//! looks for the shell's exit between reads. A second thread copies the
-//! console's output into data frames. When either side ends, the console is
-//! closed, which ends its output; the exit frame follows the last output.
+//! viosock sockets cannot be made non-blocking, and neither can the console's
+//! pipes, so the relay uses threads instead of one poll loop. The
+//! connection's own thread waits for host input with select, queues
+//! keystrokes and applies resizes, and between reads looks for the shell's
+//! exit and for a failed send. It never waits on the console. One thread
+//! writes the queued keystrokes to the console, another copies the console's
+//! output into data frames. When the session ends, the console is closed,
+//! which ends its output and fails a write still waiting on it; the exit
+//! frame follows the last output.
 
 use std::io::{self, Read, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use serde_json::json;
@@ -25,6 +29,9 @@ use crate::shell_protocol::{frame, resize, Frame, Frames, CHUNK, CONTROL, DATA};
 pub const USER: &str = "SYSTEM";
 /// How long to wait for host input before looking for the shell's exit.
 const EXIT_POLL: Duration = Duration::from_millis(200);
+/// Keystrokes queued but not yet taken by the console. Past this the console
+/// is taking no input, and further keystrokes are dropped.
+const MAX_PENDING_INPUT: usize = 1 << 20;
 
 pub fn check_user(user: &str) -> Result<(), QgaError> {
     if user.eq_ignore_ascii_case(USER) {
@@ -77,7 +84,7 @@ enum End {
 pub fn relay<C, I, O, P>(conn: &C, input: I, output: O, console: &mut P) -> String
 where
     C: Connection,
-    I: Write,
+    I: Write + Send + 'static,
     O: Read + Send,
     P: Console,
 {
@@ -85,8 +92,8 @@ where
     std::thread::scope(|scope| {
         let failed = &output_failed;
         let forward = scope.spawn(move || forward(conn, output, failed));
-        let end = match conn.keep_open() {
-            Ok(()) => pump(conn, input, console, &output_failed),
+        let end = match conn.keep_open().and_then(|()| Keystrokes::start(input)) {
+            Ok(keystrokes) => pump(conn, keystrokes, console, &output_failed),
             Err(e) => End::Failed(e),
         };
         console.close();
@@ -113,17 +120,14 @@ where
 
 /// Host input to the console until the shell exits, the host leaves or
 /// output can no longer be sent.
-fn pump<C: Connection, I: Write, P: Console>(
+fn pump<C: Connection, P: Console>(
     conn: &C,
-    mut input: I,
+    keystrokes: Keystrokes,
     console: &P,
     output_failed: &AtomicBool,
 ) -> End {
     let mut frames = Frames::default();
     let mut buf = vec![0u8; CHUNK];
-    // Once the console takes no more keystrokes, they are dropped; the host
-    // is still read so that its leaving is noticed.
-    let mut input_open = true;
     loop {
         if let Some(code) = console.exit_code() {
             return End::Exited(code);
@@ -146,11 +150,7 @@ fn pump<C: Connection, I: Write, P: Console>(
         loop {
             match frames.next() {
                 Ok(None) => break,
-                Ok(Some(Frame::Data(bytes))) => {
-                    if input_open && input.write_all(&bytes).is_err() {
-                        input_open = false;
-                    }
-                }
+                Ok(Some(Frame::Data(bytes))) => keystrokes.queue(bytes),
                 Ok(Some(Frame::Control(control))) => {
                     if let Some((rows, cols)) = resize(&control) {
                         console.resize(rows, cols);
@@ -159,6 +159,48 @@ fn pump<C: Connection, I: Write, P: Console>(
                 Ok(Some(Frame::Other)) => {}
                 Err(why) => return End::Protocol(why),
             }
+        }
+    }
+}
+
+/// Keystrokes on their way to the console, written by a thread of their own
+/// so that a console that takes no input never stops the relay. The thread
+/// ends once the queue is dropped or a write fails, as one still waiting
+/// does when the console closes; it is not joined, so not even a console
+/// that never closes holds up the end of the session.
+struct Keystrokes {
+    queue: mpsc::Sender<Vec<u8>>,
+    pending: Arc<AtomicUsize>,
+}
+
+impl Keystrokes {
+    fn start<I: Write + Send + 'static>(mut input: I) -> io::Result<Self> {
+        let (queue, keystrokes) = mpsc::channel::<Vec<u8>>();
+        let pending = Arc::new(AtomicUsize::new(0));
+        let written = pending.clone();
+        std::thread::Builder::new()
+            .name("shell-input".into())
+            .spawn(move || {
+                for bytes in keystrokes {
+                    if input.write_all(&bytes).is_err() {
+                        return;
+                    }
+                    written.fetch_sub(bytes.len(), Ordering::SeqCst);
+                }
+            })?;
+        Ok(Keystrokes { queue, pending })
+    }
+
+    fn queue(&self, bytes: Vec<u8>) {
+        let len = bytes.len();
+        let room = self
+            .pending
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n + len <= MAX_PENDING_INPUT).then_some(n + len)
+            });
+        if room.is_ok() {
+            // A writer that has stopped drops what it is sent.
+            let _ = self.queue.send(bytes);
         }
     }
 }
@@ -394,6 +436,77 @@ mod tests {
             assert_eq!(how, "the connection failed: timed out");
             assert!(closed);
             drop(host);
+        }
+
+        /// A console that never reads its input. Closing it closes the
+        /// input pipe's read end, as closing a pseudo console does.
+        struct StalledConsole {
+            input: Option<PipeReader>,
+            output: Option<PipeWriter>,
+        }
+
+        impl Console for StalledConsole {
+            fn resize(&self, _: u16, _: u16) {}
+
+            fn exit_code(&self) -> Option<u32> {
+                None
+            }
+
+            fn close(&mut self) {
+                self.input.take();
+                self.output.take();
+            }
+        }
+
+        #[test]
+        fn a_console_that_takes_no_input_does_not_hold_the_session() {
+            let (host, guest) = UnixStream::pair().unwrap();
+            let (input_reader, input) = std::io::pipe().unwrap();
+            let (output, output_writer) = std::io::pipe().unwrap();
+            let mut console = StalledConsole {
+                input: Some(input_reader),
+                output: Some(output_writer),
+            };
+            let (done, ended) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let how = relay(&guest, input, output, &mut console);
+                let _ = done.send((how, console.input.is_none()));
+            });
+            // Far more than a pipe holds, then more than the queue holds;
+            // the relay keeps reading all of it.
+            let keys = vec![b'x'; 60 << 10];
+            for _ in 0..24 {
+                (&host).write_all(&frame(DATA, &keys)).unwrap();
+            }
+            // Still relaying: resizes and keystrokes are taken.
+            (&host)
+                .write_all(&frame(CONTROL, br#"{"resize": [30, 90]}"#))
+                .unwrap();
+            assert!(ended.recv_timeout(Duration::from_millis(500)).is_err());
+            host.shutdown(std::net::Shutdown::Write).unwrap();
+            let (how, closed) = ended
+                .recv_timeout(Duration::from_secs(10))
+                .expect("a blocked console write held the session");
+            assert_eq!(how, "the host closed the connection");
+            assert!(closed);
+        }
+
+        #[test]
+        fn queued_keystrokes_are_bounded() {
+            const KEYS: usize = 60 << 10;
+            let (mut input_reader, input) = std::io::pipe().unwrap();
+            let keystrokes = Keystrokes::start(input).unwrap();
+            for _ in 0..40 {
+                keystrokes.queue(vec![b'x'; KEYS]);
+            }
+            assert!(keystrokes.pending.load(Ordering::SeqCst) <= MAX_PENDING_INPUT);
+            // Once the console reads again, everything accepted arrives.
+            drop(keystrokes);
+            let mut got = Vec::new();
+            input_reader.read_to_end(&mut got).unwrap();
+            assert_eq!(got.len() % KEYS, 0);
+            assert!(got.len() > MAX_PENDING_INPUT - KEYS, "{}", got.len());
+            assert!(got.len() < 40 * KEYS, "nothing was dropped");
         }
 
         #[test]
