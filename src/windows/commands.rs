@@ -8,7 +8,7 @@ pub mod exec;
 #[path = "../commands/file.rs"]
 pub mod file;
 
-use crate::windows::{api, queries, shell};
+use crate::windows::{api, crash, queries, shell};
 use crate::windows_support::table;
 use crate::{
     agent::Agent,
@@ -144,6 +144,7 @@ fn run(ctx: &mut Ctx<'_>, name: &str, mut args: Args) -> Reply {
                 ),
                 "guest-get-osinfo" => queries::osinfo(),
                 "guest-network-get-interfaces" => queries::interfaces(),
+                crate::windows_support::crash::NAME => crash::last_crash(),
                 "__io.virtainer_provision" => Ok(ctx
                     .agent
                     .provision

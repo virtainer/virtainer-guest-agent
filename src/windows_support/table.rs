@@ -25,6 +25,7 @@ pub const SUPPORTED: &[&str] = &[
     "guest-set-user-password",
     "__io.virtainer_provision",
     "__io.virtainer_shell",
+    "__io.virtainer_last_crash",
 ];
 pub const UNSUPPORTED: &[&str] = &[
     "guest-fsfreeze-status",
@@ -69,6 +70,7 @@ mod tests {
         assert!(SUPPORTED.contains(&"guest-shutdown"));
         assert!(UNSUPPORTED.contains(&"guest-fsfreeze-freeze"));
         assert!(SUPPORTED.contains(&"__io.virtainer_shell"));
+        assert!(SUPPORTED.contains(&crate::windows_support::crash::NAME));
         assert_eq!(
             unsupported("guest-fstrim").to_json(),
             serde_json::json!({"class":"GenericError","desc":"Command guest-fstrim is not supported"})

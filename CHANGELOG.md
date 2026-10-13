@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Windows: `__io.virtainer_last_crash` reports the bug check (blue screen)
+  that ended the previous boot, from the System event log: its stop code
+  and name, its four parameters, when it was logged and the dump path, or
+  `null`. It uses the Windows Event Log API, not PowerShell.
+
 ## 0.4.0
 
 - Windows: `__io.virtainer_shell` is supported. It runs Windows PowerShell

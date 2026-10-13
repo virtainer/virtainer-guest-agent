@@ -9,6 +9,8 @@ pub mod inventory;
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub mod accounts;
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub mod crash;
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub mod fat12;
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub mod helper;

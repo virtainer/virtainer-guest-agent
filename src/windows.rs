@@ -4,6 +4,7 @@
 //! Windows entry points; Linux's service installation and startup stay separate.
 
 pub mod api;
+pub mod crash;
 mod provision;
 pub mod queries;
 pub mod service;

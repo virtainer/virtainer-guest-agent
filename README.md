@@ -103,6 +103,7 @@ provisioning and executable replacement must also be exercised in a real guest.
 | Accounts | `guest-set-user-password` (base64 UTF-8 password, `crypted: false`) |
 | Provisioning | `__io.virtainer_provision` |
 | Shell | `__io.virtainer_shell` (Windows PowerShell as SYSTEM; see [Shell on Windows](#shell-on-windows)) |
+| Crash report | `__io.virtainer_last_crash` (see [Last blue screen](#last-blue-screen)) |
 
 `guest-set-time` requires an explicit Unix time in nanoseconds on Windows; this
 build does not read an RTC. `guest-shutdown` accepts `powerdown`, `halt` and
@@ -394,6 +395,31 @@ does in a local console. The shell runs in a job object: when the session
 ends, because the shell exited or the connection closed, every process it
 started ends with it. The exit code is reported as `guest-exec-status`
 reports it on Windows, a signed 32-bit value.
+
+### Last blue screen
+
+`__io.virtainer_last_crash` (Windows only, no arguments) reports the bug
+check that ended the previous boot, or `null` if the previous boot did not
+end in one. It reads the System event log of the current boot: Kernel-Power
+event 41, logged early in the boot, and event 1001 from
+`Microsoft-Windows-WER-SystemErrorReporting`, logged once Windows has saved
+the dump. A restart or power loss without a bug check is not reported.
+
+```json
+{"execute": "__io.virtainer_last_crash"}
+{"return": {"time": "2026-10-13T15:02:11.5000000Z",
+            "stop-code": "0x000000EF",
+            "stop-name": "CRITICAL_PROCESS_DIED",
+            "parameters": ["0xFFFFE40AE6D6F080", "0x0000000000000000",
+                           "0x0000000000000000", "0x0000000000000000"],
+            "dump-path": "C:\\Windows\\MEMORY.DMP"}}
+```
+
+`time` is when the event was logged after the restart (UTC), not the time
+of the crash. `stop-name` is left out for a code the agent has no name for,
+and `dump-path` until event 1001 has been logged, or when no dump was saved.
+The reply stays the same for the whole boot, so asking again later can add
+the dump path. Clearing the System log during the boot loses the report.
 
 ## Build
 
