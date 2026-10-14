@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1
 
 - Windows: `__io.virtainer_last_crash` reports the bug check (blue screen)
   that ended the previous boot, from the System event log: its stop code
