@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.2
+
+- Windows: guests on DHCP keep their IPv4 default gateway after network
+  provisioning. Since 0.3.2 they lost it on the first boot and could not
+  reach beyond the local network, because the reset that removes a static
+  default route also removed the route installed by the DHCP client. An
+  interface that already has DHCP for a family is now left alone; only when
+  a family switches from static to DHCP are its manual addresses and static
+  default route removed before DHCP is enabled and renewed.
+
 ## 0.4.1
 
 - Windows: `__io.virtainer_last_crash` reports the bug check (blue screen)
