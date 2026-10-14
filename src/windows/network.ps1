@@ -50,14 +50,19 @@ function Reset-VirtainerDhcp([uint32]$index) {
             continue
         }
         $present += $family
-        Get-NetIPAddress -InterfaceIndex $index -AddressFamily $family -ErrorAction SilentlyContinue |
-            Where-Object { $_.PrefixOrigin -eq 'Manual' -and $_.IPAddress -notlike 'fe80:*' } | Remove-NetIPAddress -Confirm:$false
-        $destination = if ($family -eq 'IPv4') { '0.0.0.0/0' } else { '::/0' }
-        Get-NetRoute -InterfaceIndex $index -DestinationPrefix $destination -ErrorAction SilentlyContinue |
-            Where-Object { $_.Protocol -eq 'NetMgmt' } | Remove-NetRoute -Confirm:$false
-        # Re-applying Enabled to an interface that already has DHCP drops its
-        # lease back to APIPA, and Windows then stops sending DISCOVER.
+        # An interface that already has DHCP is left as it is. Re-applying
+        # Enabled drops its lease back to APIPA, and Windows then stops
+        # sending DISCOVER. Its routes are not removed either: the default
+        # route the DHCP client installs is also reported as NetMgmt, and a
+        # renew does not put it back.
         if ($current.Dhcp -ne 'Enabled') {
+            # Switching from static: remove the manual addresses and the
+            # static default route before DHCP takes over.
+            Get-NetIPAddress -InterfaceIndex $index -AddressFamily $family -ErrorAction SilentlyContinue |
+                Where-Object { $_.PrefixOrigin -eq 'Manual' -and $_.IPAddress -notlike 'fe80:*' } | Remove-NetIPAddress -Confirm:$false
+            $destination = if ($family -eq 'IPv4') { '0.0.0.0/0' } else { '::/0' }
+            Get-NetRoute -InterfaceIndex $index -DestinationPrefix $destination -ErrorAction SilentlyContinue |
+                Where-Object { $_.Protocol -eq 'NetMgmt' } | Remove-NetRoute -Confirm:$false
             Set-NetIPInterface -InterfaceIndex $index -AddressFamily $family -Dhcp Enabled
             if ($family -eq 'IPv4') { $renew = $current.InterfaceAlias }
         }

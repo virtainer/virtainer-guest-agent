@@ -61,7 +61,7 @@ mod tests {
     /// The script cannot run without Windows, so these pin the structure that
     /// the behaviour depends on.
     #[test]
-    fn script_waits_for_the_interface_and_never_sets_an_absent_one() {
+    fn script_waits_for_the_interface_and_keeps_an_existing_dhcp_configuration() {
         let ps = include_str!("../windows/network.ps1");
         // Bounded wait: 60 s, polled every 2 s, one deadline for the script.
         assert!(ps.contains("$netIpWaitSeconds = 60"));
@@ -91,6 +91,34 @@ mod tests {
         assert!(dhcp.contains("Write-VirtainerWarning"));
         assert!(!dhcp.contains("elseif (-not $current)"));
         assert!(dhcp.contains("if ($current.Dhcp -ne 'Enabled')"));
+        // DHCP: an interface that already has DHCP keeps its addresses and
+        // routes, so the gateway its lease installed (reported as NetMgmt)
+        // survives. Only a switch from static removes the manual addresses
+        // and the static default route, then enables DHCP and renews.
+        let switch = dhcp.find("if ($current.Dhcp -ne 'Enabled') {").unwrap();
+        let switch_end = switch + dhcp[switch..].find("\n        }\n").unwrap();
+        let switching = &dhcp[switch..switch_end];
+        for removal in ["Remove-NetIPAddress", "Remove-NetRoute"] {
+            assert_eq!(dhcp.matches(removal).count(), 1, "{removal}");
+            assert!(switching.contains(removal), "{removal}");
+        }
+        let enable = switching
+            .find("Set-NetIPInterface -InterfaceIndex $index -AddressFamily $family -Dhcp Enabled")
+            .unwrap();
+        assert!(switching.find("Remove-NetRoute").unwrap() < enable);
+        assert!(switching.find("Remove-NetIPAddress").unwrap() < enable);
+        assert!(switching.contains("$renew = $current.InterfaceAlias"));
+        assert!(switching.contains("Where-Object { $_.Protocol -eq 'NetMgmt' }"));
+        // Router discovery is still enabled for IPv6 either way.
+        assert!(dhcp[switch_end..]
+            .contains("Set-NetIPInterface -InterfaceIndex $index -AddressFamily IPv6 -RouterDiscovery Enabled"));
+        // Both DHCP selections, all hardware adapters and by MAC, take this
+        // path; nothing else outside the static branch removes routes.
+        let selection = &ps
+            [ps.find("if ($p.dhcp_all) {").unwrap()..ps.find("foreach ($n in $p.static)").unwrap()];
+        assert_eq!(selection.matches("Reset-VirtainerDhcp").count(), 2);
+        assert!(!selection.contains("Remove-Net"));
+        assert_eq!(ps.matches("Remove-NetRoute").count(), 2);
         // Static: the interface is required, naming the MAC and family.
         let statics = &ps[ps.find("foreach ($n in $p.static)").unwrap()..];
         let require = statics
