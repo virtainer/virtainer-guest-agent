@@ -450,16 +450,13 @@ mod tests {
 
     #[test]
     fn freeze_with_nothing_matched_still_runs_the_thaw_hook() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let hook = dir.path().join("hook");
         let log = dir.path().join("calls");
-        std::fs::write(
+        install_hook(
             &hook,
-            format!("#!/bin/sh\necho \"$1\" >> {}\n", log.display()),
-        )
-        .unwrap();
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+            &format!("#!/bin/sh\necho \"$1\" >> {}\n", log.display()),
+        );
         let freezer = Freezer::new(dir.path().join("frozen"), None);
         let count = freezer
             .freeze(
@@ -485,13 +482,28 @@ mod tests {
         assert_eq!(mode, 0o700);
     }
 
+    /// Writes an executable hook without this process ever holding a writable
+    /// descriptor on it. Tests run in parallel threads, and a child forked by
+    /// another test inherits every open descriptor until it execs; if that
+    /// includes a write descriptor on the hook, executing the hook fails with
+    /// ETXTBSY. The script goes to a side file and a child process installs it.
+    fn install_hook(hook: &std::path::Path, script: &str) {
+        let source = hook.with_extension("src");
+        std::fs::write(&source, script).unwrap();
+        let status = std::process::Command::new("install")
+            .args(["-m", "0755"])
+            .arg(&source)
+            .arg(hook)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
     #[test]
     fn a_failing_freeze_hook_freezes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let hook = dir.path().join("hook");
-        std::fs::write(&hook, "#!/bin/sh\necho \"no $1 today\"; exit 1\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        install_hook(&hook, "#!/bin/sh\necho \"no $1 today\"; exit 1\n");
         let freezer = Freezer::new(dir.path().join("frozen"), None);
         let err = freezer.freeze("t", Some(hook), None).unwrap_err();
         assert_eq!(
