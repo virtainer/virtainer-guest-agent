@@ -120,9 +120,23 @@ mod tests {
     const INSTANCE: &str = "00000000-0000-4000-8000-000000000001";
 
     #[cfg(unix)]
+    fn install_script(path: &Path, script: &[u8]) -> std::io::Result<()> {
+        // A child installs the executable so parallel test children cannot
+        // inherit a writable descriptor on it and cause ETXTBSY.
+        let source = path.with_extension("src");
+        std::fs::write(&source, script)?;
+        let status = std::process::Command::new("install")
+            .args(["-m", "0700"])
+            .arg(&source)
+            .arg(path)
+            .status()?;
+        assert!(status.success());
+        Ok(())
+    }
+
+    #[cfg(unix)]
     #[test]
     fn installed_updater_runs_when_replacement_exits_during_initialization() {
-        use std::os::unix::fs::PermissionsExt;
         use std::process::Command;
 
         let dir = tempfile::tempdir().unwrap();
@@ -134,10 +148,9 @@ mod tests {
             &installed,
             current,
             replacement,
-            |path, bytes| std::fs::write(path, bytes).map_err(|e| e.to_string()),
+            |path, bytes| install_script(path, bytes).map_err(|e| e.to_string()),
             |helper| {
                 assert_eq!(helper, installed.with_extension("updater.exe"));
-                std::fs::set_permissions(helper, std::fs::Permissions::from_mode(0o700)).unwrap();
                 assert!(Command::new(helper)
                     .arg("update")
                     .status()
@@ -154,7 +167,6 @@ mod tests {
         assert_eq!(std::fs::read(&installed).unwrap(), current);
         let staged = installed.with_extension("next.exe");
         assert_eq!(std::fs::read(&staged).unwrap(), replacement);
-        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(Command::new(staged).status().unwrap().code(), Some(99));
     }
 
