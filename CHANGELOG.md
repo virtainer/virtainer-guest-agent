@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.3
 
 - Windows: `guest-get-vcpus` lists every active logical processor, across
   all processor groups, as online and not offlinable. Windows starts a
