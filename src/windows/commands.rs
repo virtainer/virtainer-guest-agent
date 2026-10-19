@@ -144,6 +144,7 @@ fn run(ctx: &mut Ctx<'_>, name: &str, mut args: Args) -> Reply {
                 ),
                 "guest-get-osinfo" => queries::osinfo(),
                 "guest-network-get-interfaces" => queries::interfaces(),
+                "guest-get-vcpus" => queries::vcpus(),
                 crate::windows_support::crash::NAME => crash::last_crash(),
                 "__io.virtainer_provision" => Ok(ctx
                     .agent

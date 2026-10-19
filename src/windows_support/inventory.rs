@@ -45,6 +45,17 @@ pub fn interface(name: &[u16], mac: &[u8], addresses: Vec<Value>) -> Value {
     entry
 }
 
+/// `guest-get-vcpus` on Windows. Windows starts a hot-added processor by itself and cannot
+/// take one offline, so every active logical processor is online and none can be offlined,
+/// which is also what qemu-ga's Windows build reports.
+pub fn logical_processors(active: u32) -> Value {
+    Value::Array(
+        (0..active)
+            .map(|id| json!({"logical-id": id, "online": true, "can-offline": false}))
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +122,17 @@ mod tests {
         assert_eq!(
             interface(&[], &[0, 1], vec![]),
             json!({"name": "", "hardware-address": "00:01"})
+        );
+    }
+
+    #[test]
+    fn every_active_processor_is_online_and_fixed() {
+        assert_eq!(
+            logical_processors(2),
+            json!([
+                {"logical-id": 0, "online": true, "can-offline": false},
+                {"logical-id": 1, "online": true, "can-offline": false},
+            ])
         );
     }
 }

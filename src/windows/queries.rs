@@ -25,12 +25,25 @@ use windows_sys::Win32::{
     Networking::WinSock::{
         AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR_IN, SOCKADDR_IN6, SOCKET_ADDRESS,
     },
+    System::Threading::{GetActiveProcessorCount, ALL_PROCESSOR_GROUPS},
 };
 
 fn query(code: &str, action: &str) -> Reply {
     let out = sys::ps(code, &json!({}), action, &[]).map_err(QgaError::generic)?;
     serde_json::from_slice(&out)
         .map_err(|_| QgaError::generic(format!("{action}: invalid inventory response")))
+}
+/// Counted across every processor group, so a guest with more than 64 vCPUs is whole.
+pub fn vcpus() -> Reply {
+    // SAFETY: no pointers; 0 means failure.
+    let active = unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) };
+    if active == 0 {
+        return Err(QgaError::os(
+            "failed to count logical processors",
+            &io::Error::last_os_error(),
+        ));
+    }
+    Ok(inventory::logical_processors(active))
 }
 pub fn osinfo() -> Reply {
     query(

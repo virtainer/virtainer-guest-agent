@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Windows: `guest-get-vcpus` lists every active logical processor, across
+  all processor groups, as online and not offlinable. Windows starts a
+  hot-added vCPU by itself, so this is how the host confirms a live CPU
+  hot-add. Memory is still not reported: Windows has no offline state for
+  hot-added memory.
+
 ## 0.4.2
 
 - Windows: guests on DHCP keep their IPv4 default gateway after network
