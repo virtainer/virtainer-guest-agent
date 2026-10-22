@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.4
 
 - Windows: `__io.virtainer_winrm_https` reports the WinRM HTTPS listener and
   its certificate: port, listener hostname, the certificate's SHA-256, expiry
