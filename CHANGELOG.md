@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Windows: `__io.virtainer_winrm_https` reports the WinRM HTTPS listener and
+  its certificate: port, listener hostname, the certificate's SHA-256, expiry
+  and subject alternative names, or `null` when WinRM is not running or has
+  no HTTPS listener.
+
 ## 0.4.3
 
 - Windows: `guest-get-vcpus` lists every active logical processor, across

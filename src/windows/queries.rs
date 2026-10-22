@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Virtainer authors
 
-//! Windows network inventory through IP Helper; OS identity through CIM.
+//! Windows network inventory through IP Helper; OS identity through CIM; the
+//! WinRM HTTPS listener through WS-Management.
 
 use crate::{
     qmp::{QgaError, Reply},
     sys,
-    windows_support::inventory,
+    windows_support::{inventory, winrm},
 };
 use serde_json::json;
 use std::{
@@ -55,6 +56,11 @@ $o=Get-CimInstance Win32_OperatingSystem;
 "#,
         "get OS info",
     )
+}
+pub fn winrm_https() -> Reply {
+    let action = "get the WinRM HTTPS listener";
+    let out = sys::ps(winrm::QUERY, &json!({}), action, &[]).map_err(QgaError::generic)?;
+    winrm::reply(&out).map_err(|e| QgaError::generic(format!("{action}: {e}")))
 }
 pub fn interfaces() -> Reply {
     adapter_interfaces()

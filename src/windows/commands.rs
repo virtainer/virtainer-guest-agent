@@ -146,6 +146,7 @@ fn run(ctx: &mut Ctx<'_>, name: &str, mut args: Args) -> Reply {
                 "guest-network-get-interfaces" => queries::interfaces(),
                 "guest-get-vcpus" => queries::vcpus(),
                 crate::windows_support::crash::NAME => crash::last_crash(),
+                crate::windows_support::winrm::NAME => queries::winrm_https(),
                 "__io.virtainer_provision" => Ok(ctx
                     .agent
                     .provision

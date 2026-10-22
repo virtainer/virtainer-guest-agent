@@ -27,6 +27,7 @@ pub const SUPPORTED: &[&str] = &[
     "__io.virtainer_shell",
     "__io.virtainer_last_crash",
     "guest-get-vcpus",
+    "__io.virtainer_winrm_https",
 ];
 pub const UNSUPPORTED: &[&str] = &[
     "guest-fsfreeze-status",
@@ -73,6 +74,7 @@ mod tests {
         assert!(SUPPORTED.contains(&crate::windows_support::crash::NAME));
         assert!(SUPPORTED.contains(&"guest-get-vcpus"));
         assert!(UNSUPPORTED.contains(&"guest-set-vcpus"));
+        assert!(SUPPORTED.contains(&crate::windows_support::winrm::NAME));
         assert_eq!(
             unsupported("guest-fstrim").to_json(),
             serde_json::json!({"class":"GenericError","desc":"Command guest-fstrim is not supported"})

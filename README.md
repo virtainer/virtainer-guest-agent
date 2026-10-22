@@ -104,6 +104,7 @@ provisioning and executable replacement must also be exercised in a real guest.
 | Provisioning | `__io.virtainer_provision` |
 | Shell | `__io.virtainer_shell` (Windows PowerShell as SYSTEM; see [Shell on Windows](#shell-on-windows)) |
 | Crash report | `__io.virtainer_last_crash` (see [Last blue screen](#last-blue-screen)) |
+| WinRM | `__io.virtainer_winrm_https` (see [WinRM HTTPS listener](#winrm-https-listener)) |
 
 `guest-set-time` requires an explicit Unix time in nanoseconds on Windows; this
 build does not read an RTC. `guest-shutdown` accepts `powerdown`, `halt` and
@@ -420,6 +421,31 @@ of the crash. `stop-name` is left out for a code the agent has no name for,
 and `dump-path` until event 1001 has been logged, or when no dump was saved.
 The reply stays the same for the whole boot, so asking again later can add
 the dump path. Clearing the System log during the boot loses the report.
+
+### WinRM HTTPS listener
+
+`__io.virtainer_winrm_https` (Windows only, no arguments) reports the WinRM
+HTTPS listener and the certificate it is bound to, so that a client can
+verify the certificate the guest presents on that port. The reply is `null`
+when the WinRM service is not running or has no HTTPS listener.
+
+```json
+{"execute": "__io.virtainer_winrm_https"}
+{"return": {"port": 5986, "hostname": "WIN-01",
+            "certificate": {
+              "sha256": "e298d4be182e6fcc146856d156ef50514390dfe07db0c557b3b22d9f44d2ead1",
+              "not-after": "2027-10-18T15:36:56Z",
+              "dns-names": ["WIN-01"],
+              "ip-addresses": ["10.0.0.5", "fd00::5"]}}}
+```
+
+`hostname` is the listener's own setting. `sha256` is the lowercase hex
+SHA-256 of the DER certificate, not the SHA-1 thumbprint Windows shows;
+`not-after` is its expiry in UTC; `dns-names` and `ip-addresses` are its
+subject alternative names. `certificate` is `null` when the listener names a
+certificate that is not in the LocalMachine\My store. The listener is read
+through WS-Management by a Windows PowerShell helper, so a reply takes a
+second or more.
 
 ## Build
 
