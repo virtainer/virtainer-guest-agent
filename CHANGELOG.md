@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Linux: the freeze watchdog no longer thaws a newer freeze. When a freeze
+  outlived its timeout while the host thawed it and froze again, the
+  watchdog could thaw the new freeze, so the host's snapshot was no longer
+  quiesced. The watchdog now thaws only the freeze it found overdue.
+  Timeouts, the thaw at exit and the counts the host sees are unchanged.
+
 ## 0.4.4
 
 - Windows: `__io.virtainer_winrm_https` reports the WinRM HTTPS listener and

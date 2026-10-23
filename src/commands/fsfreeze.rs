@@ -77,8 +77,8 @@ pub struct Freezer {
 }
 
 struct State {
-    /// Bumped by every freeze and thaw, so a watchdog that decided to act on
-    /// one window never thaws the next.
+    /// Bumped by every freeze and by every thaw that got as far as the
+    /// filesystems: the watchdog tells by it whether its thaw did anything.
     generation: u64,
     /// Boot-clock deadline for the watchdog.
     deadline: Option<Duration>,
@@ -192,8 +192,7 @@ impl Freezer {
                 Ok(count)
             }
             Err(error) => {
-                drop(state);
-                if let Err(thaw_error) = self.thaw(hook) {
+                if let Err(thaw_error) = self.thaw_locked(&mut state, hook) {
                     crate::error!("thaw after a failed freeze failed: {}", thaw_error.desc);
                 }
                 Err(error)
@@ -203,6 +202,13 @@ impl Freezer {
 
     pub fn thaw(&self, hook: Option<PathBuf>) -> Result<i64, QgaError> {
         let mut state = self.lock();
+        self.thaw_locked(&mut state, hook)
+    }
+
+    /// Thaw, with the state already locked by the caller: whatever made the
+    /// caller decide to thaw still holds when it does, as no freeze or thaw
+    /// can run in between.
+    fn thaw_locked(&self, state: &mut State, hook: Option<PathBuf>) -> Result<i64, QgaError> {
         let mounts = self
             .fs
             .mounts()
@@ -236,18 +242,17 @@ impl Freezer {
                     .0;
                 continue;
             }
+            // The window is overdue. It is thawed under the same guard that
+            // saw it overdue: a host's thaw of it and its next freeze wait,
+            // so the next window can never be the one thawed here.
             let generation = state.generation;
-            drop(state);
-            if self.lock().generation == generation {
-                crate::warning!(
-                    "no thaw arrived within freeze-timeout; thawing filesystems on our own"
-                );
-                match self.thaw(hook()) {
-                    Ok(count) => crate::warning!("auto-thawed {count} filesystems"),
-                    Err(e) => crate::error!("auto-thaw failed: {}", e.desc),
-                }
+            crate::warning!(
+                "no thaw arrived within freeze-timeout; thawing filesystems on our own"
+            );
+            match self.thaw_locked(&mut state, hook()) {
+                Ok(count) => crate::warning!("auto-thawed {count} filesystems"),
+                Err(e) => crate::error!("auto-thaw failed: {}", e.desc),
             }
-            state = self.lock();
             if state.generation == generation {
                 // Thaw failed before it got anywhere (mountinfo unreadable):
                 // try again shortly rather than spin or give up.
