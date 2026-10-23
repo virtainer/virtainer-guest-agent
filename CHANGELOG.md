@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.5
 
 - Linux: the freeze watchdog no longer thaws a newer freeze. When a freeze
   outlived its timeout while the host thawed it and froze again, the
