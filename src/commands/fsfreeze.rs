@@ -42,7 +42,33 @@ const FITRIM: u64 = 0xC018_5879;
 const HOOK_TIMEOUT: Duration = Duration::from_secs(300);
 const WATCHDOG_RETRY: Duration = Duration::from_secs(10);
 
+/// What freezing does to the filesystems. `Kernel` is the agent's; the tests
+/// put a stand-in in its place, so the freezer's own state machine can be
+/// driven without freezing the filesystems of the machine running them.
+trait Filesystems: Send + Sync {
+    fn mounts(&self) -> std::io::Result<Vec<Mount>>;
+    fn freeze(&self, mounts: &[Mount], only: Option<&[String]>) -> Result<i64, QgaError>;
+    fn thaw(&self, mounts: &[Mount]) -> i64;
+}
+
+struct Kernel;
+
+impl Filesystems for Kernel {
+    fn mounts(&self) -> std::io::Result<Vec<Mount>> {
+        local_mounts()
+    }
+
+    fn freeze(&self, mounts: &[Mount], only: Option<&[String]>) -> Result<i64, QgaError> {
+        freeze_mounts(mounts, only)
+    }
+
+    fn thaw(&self, mounts: &[Mount]) -> i64 {
+        thaw_mounts(mounts)
+    }
+}
+
 pub struct Freezer {
+    fs: Box<dyn Filesystems>,
     frozen: AtomicBool,
     state: Mutex<State>,
     wake: Condvar,
@@ -60,6 +86,10 @@ struct State {
 
 impl Freezer {
     pub fn new(marker: PathBuf, timeout: Option<Duration>) -> Self {
+        Self::with_fs(Box::new(Kernel), marker, timeout)
+    }
+
+    fn with_fs(fs: Box<dyn Filesystems>, marker: PathBuf, timeout: Option<Duration>) -> Self {
         let restored = std::fs::read_to_string(&marker).ok();
         let deadline = restored.as_ref().and_then(|text| {
             text.trim()
@@ -69,6 +99,7 @@ impl Freezer {
                 .or_else(|| timeout.map(|t| sys::boottime() + t))
         });
         Self {
+            fs,
             frozen: AtomicBool::new(restored.is_some()),
             state: Mutex::new(State {
                 generation: 0,
@@ -131,7 +162,7 @@ impl Freezer {
         }
         crate::info!("guest-fsfreeze called");
         run_hook(hook.as_ref(), "freeze")?;
-        let mounts = match local_mounts() {
+        let mounts = match self.fs.mounts() {
             Ok(mounts) => mounts,
             Err(e) => {
                 // Nothing got frozen; let the hook resume what it paused.
@@ -145,7 +176,7 @@ impl Freezer {
         let deadline = self.timeout.map(|t| sys::boottime() + t);
         self.mark_frozen(deadline);
         state.generation += 1;
-        match freeze_mounts(&mounts, mountpoints.as_deref()) {
+        match self.fs.freeze(&mounts, mountpoints.as_deref()) {
             Ok(0) => {
                 // Nothing was frozen, but the hook already paused the guest's
                 // applications.
@@ -172,9 +203,11 @@ impl Freezer {
 
     pub fn thaw(&self, hook: Option<PathBuf>) -> Result<i64, QgaError> {
         let mut state = self.lock();
-        let mounts =
-            local_mounts().map_err(|e| QgaError::os("failed to read /proc/self/mountinfo", &e))?;
-        let count = thaw_mounts(&mounts);
+        let mounts = self
+            .fs
+            .mounts()
+            .map_err(|e| QgaError::os("failed to read /proc/self/mountinfo", &e))?;
+        let count = self.fs.thaw(&mounts);
         state.generation += 1;
         state.deadline = None;
         let was_frozen = self.is_frozen();
@@ -527,6 +560,208 @@ mod tests {
             "Command guest-fsfreeze-freeze has been disabled: the command is not allowed"
         );
         assert!(freezer.is_frozen());
+    }
+
+    /// Stand-in filesystems: one mount, frozen or not, and a record of what
+    /// was done to it and by which thread.
+    #[derive(Default)]
+    struct Fake {
+        frozen: Mutex<bool>,
+        log: Mutex<Vec<String>>,
+        /// Fail this many mount table reads.
+        unreadable: Mutex<u32>,
+        fail_freeze: AtomicBool,
+    }
+
+    struct Shared(std::sync::Arc<Fake>);
+
+    fn thread_name() -> String {
+        std::thread::current()
+            .name()
+            .unwrap_or("unnamed")
+            .to_string()
+    }
+
+    impl Filesystems for Shared {
+        fn mounts(&self) -> std::io::Result<Vec<Mount>> {
+            let mut left = self.0.unreadable.lock().unwrap();
+            if *left > 0 {
+                *left -= 1;
+                return Err(std::io::Error::other("mount table unreadable"));
+            }
+            Ok(vec![Mount {
+                dir: "/fake".into(),
+                fstype: "ext4".into(),
+                major: 0,
+                minor: 0,
+            }])
+        }
+
+        fn freeze(&self, _: &[Mount], _: Option<&[String]>) -> Result<i64, QgaError> {
+            if self.0.fail_freeze.load(Ordering::SeqCst) {
+                return Err(QgaError::generic("freeze failed"));
+            }
+            *self.0.frozen.lock().unwrap() = true;
+            self.0
+                .log
+                .lock()
+                .unwrap()
+                .push(format!("freeze by {}", thread_name()));
+            Ok(1)
+        }
+
+        fn thaw(&self, _: &[Mount]) -> i64 {
+            let was = std::mem::take(&mut *self.0.frozen.lock().unwrap());
+            self.0
+                .log
+                .lock()
+                .unwrap()
+                .push(format!("thaw {} by {}", was as i64, thread_name()));
+            was as i64
+        }
+    }
+
+    fn fake_freezer(fake: &std::sync::Arc<Fake>) -> (tempfile::TempDir, std::sync::Arc<Freezer>) {
+        let dir = tempfile::tempdir().unwrap();
+        let f = Freezer::with_fs(
+            Box::new(Shared(fake.clone())),
+            dir.path().join("frozen"),
+            Some(Duration::from_secs(3600)),
+        );
+        (dir, std::sync::Arc::new(f))
+    }
+
+    /// Run the watchdog on a thread named "watchdog", with `hook` as its hook.
+    fn watchdog(f: &std::sync::Arc<Freezer>, hook: impl Fn() -> Option<PathBuf> + Send + 'static) {
+        let f = f.clone();
+        std::thread::Builder::new()
+            .name("watchdog".into())
+            .spawn(move || f.watchdog(hook))
+            .unwrap();
+    }
+
+    /// Make the current window overdue, as if its deadline had passed.
+    fn expire(f: &Freezer) {
+        f.lock().deadline = Some(Duration::ZERO);
+        f.wake.notify_all();
+    }
+
+    /// Wait up to five seconds for `done`.
+    fn eventually(what: &str, done: impl Fn() -> bool) {
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(std::time::Instant::now() < until, "{what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn the_watchdog_thaws_an_overdue_freeze() {
+        let fake = std::sync::Arc::new(Fake::default());
+        let (_dir, f) = fake_freezer(&fake);
+        assert_eq!(f.freeze("t", None, None).unwrap(), 1);
+        let generation = f.lock().generation;
+        watchdog(&f, || None);
+        expire(&f);
+        eventually("the watchdog thaws", || !f.is_frozen());
+        assert_eq!(
+            *fake.log.lock().unwrap().last().unwrap(),
+            "thaw 1 by watchdog"
+        );
+        let state = f.lock();
+        assert_eq!((state.generation, state.deadline), (generation + 1, None));
+    }
+
+    #[test]
+    fn a_stale_watchdog_never_thaws_the_next_freeze() {
+        // The watchdog decides to thaw window A. In the same moment a host
+        // thaws A and freezes B. Whichever order the two take, B must stay
+        // frozen: the watchdog may thaw A, never B.
+        let fake = std::sync::Arc::new(Fake::default());
+        let (_dir, f) = fake_freezer(&fake);
+        assert_eq!(f.freeze("t", None, None).unwrap(), 1);
+        let host = f.clone();
+        let started = std::sync::Arc::new(Mutex::new(None));
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let (tx, rx) = (Mutex::new(Some(tx)), Mutex::new(rx));
+        let handle = started.clone();
+        // The watchdog asks for its hook once it decided to act: let the host
+        // go then, and give it half a second before the watchdog goes on.
+        watchdog(&f, move || {
+            if let Some(tx) = tx.lock().unwrap().take() {
+                let host = host.clone();
+                let h = std::thread::Builder::new()
+                    .name("host".into())
+                    .spawn(move || {
+                        host.thaw(None).unwrap();
+                        host.freeze("t", None, None).unwrap();
+                        let _ = tx.send(());
+                    })
+                    .unwrap();
+                *handle.lock().unwrap() = Some(h);
+                let _ = rx.lock().unwrap().recv_timeout(Duration::from_millis(500));
+            }
+            None
+        });
+        expire(&f);
+        eventually("the host thread starts", || {
+            started.lock().unwrap().is_some()
+        });
+        started.lock().unwrap().take().unwrap().join().unwrap();
+        eventually("both thaws and the second freeze happened", || {
+            fake.log.lock().unwrap().len() == 4
+        });
+        // Nothing more is due before B's own deadline.
+        std::thread::sleep(Duration::from_millis(200));
+        let log = fake.log.lock().unwrap().clone();
+        assert_eq!(log.len(), 4, "{log:?}");
+        assert_eq!(
+            log[3], "freeze by host",
+            "B was thawed after it froze: {log:?}"
+        );
+        assert!(log.contains(&"thaw 1 by watchdog".to_string()), "{log:?}");
+        assert!(f.is_frozen(), "{log:?}");
+        assert!(*fake.frozen.lock().unwrap());
+        assert!(f.lock().deadline.is_some_and(|d| d > sys::boottime()));
+    }
+
+    #[test]
+    fn an_auto_thaw_that_cannot_read_the_mount_table_is_retried() {
+        let fake = std::sync::Arc::new(Fake::default());
+        let (_dir, f) = fake_freezer(&fake);
+        f.freeze("t", None, None).unwrap();
+        *fake.unreadable.lock().unwrap() = 1;
+        watchdog(&f, || None);
+        expire(&f);
+        eventually("the watchdog schedules a retry", || {
+            f.lock().deadline.is_some_and(|d| d > sys::boottime())
+        });
+        assert!(f.is_frozen(), "still frozen after the failed attempt");
+        let retry = f.lock().deadline.unwrap() - sys::boottime();
+        assert!(retry <= WATCHDOG_RETRY, "{retry:?}");
+        expire(&f);
+        eventually("the retry thaws", || !f.is_frozen());
+        assert_eq!(
+            *fake.log.lock().unwrap().last().unwrap(),
+            "thaw 1 by watchdog"
+        );
+    }
+
+    #[test]
+    fn a_freeze_that_fails_thaws_what_it_froze() {
+        let fake = std::sync::Arc::new(Fake::default());
+        let (_dir, f) = fake_freezer(&fake);
+        fake.fail_freeze.store(true, Ordering::SeqCst);
+        *fake.frozen.lock().unwrap() = true;
+        let generation = f.lock().generation;
+        assert_eq!(f.freeze("t", None, None).unwrap_err().desc, "freeze failed");
+        assert!(!f.is_frozen());
+        assert!(
+            !*fake.frozen.lock().unwrap(),
+            "the partial freeze was thawed"
+        );
+        let state = f.lock();
+        assert_eq!((state.generation, state.deadline), (generation + 2, None));
     }
 
     #[test]
